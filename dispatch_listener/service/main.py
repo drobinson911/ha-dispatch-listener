@@ -36,7 +36,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 
 def load_options() -> dict:
@@ -53,6 +53,8 @@ def load_options() -> dict:
         "whisper_model": "base.en",
         "phrase_triggers": [],
         "audio_preprocess": True,
+        "whisper_server_url": "",
+        "whisper_server_timeout_sec": 30.0,
         "continuous_transcription": False,
         "vad_activation_db": 12.0,
         "vad_min_burst_seconds": 0.5,
@@ -180,10 +182,14 @@ async def main() -> int:
         transcriber = Transcriber(
             model_name=opts.get("whisper_model", "base.en"),
             preprocess=bool(opts.get("audio_preprocess", True)),
+            server_url=opts.get("whisper_server_url", ""),
+            server_timeout_sec=float(opts.get("whisper_server_timeout_sec", 30.0)),
         )
-        # Preload model if continuous mode — we want fast first-burst response
-        if opts.get("continuous_transcription", False):
-            log.info("continuous_transcription enabled — preloading whisper model now…")
+        if transcriber.server_url:
+            log.info("whisper remote server configured: %s (local fallback ready)", transcriber.server_url)
+        # Preload local model if continuous mode + no remote — fast first-burst response
+        if opts.get("continuous_transcription", False) and not transcriber.server_url:
+            log.info("continuous_transcription enabled (local mode) — preloading whisper model…")
             await asyncio.get_event_loop().run_in_executor(None, transcriber._ensure_model)
 
     archiver = Archiver(

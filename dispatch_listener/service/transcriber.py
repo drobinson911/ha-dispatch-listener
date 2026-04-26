@@ -1,23 +1,29 @@
-"""Whisper transcription via pywhispercpp.
+"""Whisper transcription — remote (HTTP server) primary, local (whisper.cpp) fallback.
 
-Runs whisper.cpp under the hood — pure C++, no PyTorch, ARM-friendly.
-Models cached in /data/models so they persist across addon restarts.
+Two modes (auto-selected based on whisper_server_url):
 
-Transcription is sync (whisper.cpp blocks); we run it in an executor so the
-asyncio capture loop isn't blocked while we transcribe ~30 sec of audio.
+- REMOTE (preferred): POST audio to a faster-whisper HTTP server (typically
+  whisper-large-v3 on a GPU box reachable via Tailscale). Best accuracy,
+  bounded latency. Falls back to LOCAL on any HTTP/connection error.
 
-Optional acoustic preprocessing: ffmpeg filter chain that bandpasses to
-voice range, denoises, levels loudness BEFORE handing to Whisper. Improves
-accuracy on noisy radio audio. ONLY runs on Whisper-bound audio — the
-DTMF decoder always reads the raw stream so tone detection is unaffected.
+- LOCAL: pywhispercpp (whisper.cpp under the hood) running in-addon on the
+  HA Yellow CPU. Lightweight model only (tiny.en / base.en). Fallback for
+  when the remote server is unreachable.
+
+Optional acoustic preprocessing (ffmpeg filter chain) can run before either
+path. ONLY applies to Whisper-bound audio — the DTMF decoder always reads
+the raw stream so tone detection is unaffected by these settings.
 """
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import wave
 from pathlib import Path
 
+import httpx
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -36,15 +42,21 @@ PREPROCESS_FILTER_CHAIN = (
 
 
 class Transcriber:
-    def __init__(self, model_name: str = "base.en", preprocess: bool = True) -> None:
+    def __init__(
+        self,
+        model_name: str = "base.en",
+        preprocess: bool = True,
+        server_url: str = "",
+        server_timeout_sec: float = 30.0,
+    ) -> None:
         self.model_name = model_name
         self.preprocess = preprocess
-        self._model = None  # lazy-loaded on first use
-        # whisper.cpp's Model object is NOT thread/reentrant safe. If two
-        # voice bursts overlap (e.g., back-to-back transmissions), parallel
-        # calls into model.transcribe() crash with a GGML_ASSERT. Serialize
-        # all transcription calls through this lock — bursts queue up.
-        self._lock: asyncio.Lock | None = None
+        self.server_url = server_url.rstrip("/") if server_url else ""
+        self.server_timeout_sec = server_timeout_sec
+        self._model = None  # lazy-loaded on first use (only when remote unavailable)
+        self._lock: asyncio.Lock | None = None  # serialize local model calls
+        self._remote_failures = 0
+        self._remote_total = 0
 
     def _ensure_model(self):
         if self._model is not None:
@@ -85,35 +97,78 @@ class Transcriber:
         return np.frombuffer(stdout, dtype=np.int16)
 
     async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
-        """Transcribe a numpy audio array to text. Serialized via lock — overlapping
-        bursts queue up to avoid the whisper.cpp non-reentrant crash."""
+        """Transcribe audio to text. Routes:
+        - If server_url set: try remote, fall back to local on error
+        - Otherwise: local only
+        """
         if len(audio) == 0:
             return ""
 
-        # Lazy-init the lock so we can construct Transcriber outside an event loop
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-
-        # Acquire the model lock for the entire preprocess+transcribe critical section.
-        # This serializes all whisper calls; bursts queue. Cheap because radio audio
-        # is mostly silence anyway.
-        async with self._lock:
-            return await self._transcribe_locked(audio, sample_rate)
-
-    async def _transcribe_locked(self, audio: np.ndarray, sample_rate: int) -> str:
-        # Optional acoustic preprocessing — bandpass + denoise + loudnorm + downsample to 16k
+        # Optional acoustic preprocessing — runs once regardless of route
+        audio_for_whisper = audio
+        sr_for_whisper = sample_rate
         if self.preprocess:
             audio_i16 = audio if audio.dtype == np.int16 else (audio * 32767).astype(np.int16)
             try:
-                processed = await self._preprocess_audio(audio_i16, sample_rate)
-                audio = processed
-                sample_rate = 16000  # preprocess always outputs 16 kHz for whisper
+                audio_for_whisper = await self._preprocess_audio(audio_i16, sample_rate)
+                sr_for_whisper = 16000
             except FileNotFoundError:
                 log.warning("ffmpeg not found — skipping preprocessing")
             except Exception as e:
                 log.warning("preprocess error %s — using raw audio", e)
 
-        # whisper expects float32 normalized [-1, 1] at 16 kHz
+        # Try remote first if configured
+        if self.server_url:
+            self._remote_total += 1
+            try:
+                text = await self._transcribe_remote(audio_for_whisper, sr_for_whisper)
+                return text
+            except Exception as e:
+                self._remote_failures += 1
+                log.warning(
+                    "remote whisper failed (%s/%s) — falling back to local: %s",
+                    self._remote_failures, self._remote_total, e,
+                )
+
+        # Local fallback (also the default if no server_url)
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            return await self._transcribe_local(audio_for_whisper, sr_for_whisper)
+
+    async def _transcribe_remote(self, audio: np.ndarray, sample_rate: int) -> str:
+        """POST audio as a WAV upload to the configured remote whisper server."""
+        # Build a WAV in memory
+        if audio.dtype != np.int16:
+            audio = (audio * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            w.writeframes(audio.tobytes())
+        buf.seek(0)
+
+        url = f"{self.server_url}/transcribe"
+        async with httpx.AsyncClient(timeout=self.server_timeout_sec) as client:
+            r = await client.post(
+                url,
+                files={"file": ("audio.wav", buf.getvalue(), "audio/wav")},
+            )
+            r.raise_for_status()
+            data = r.json()
+        text = (data.get("text") or "").strip()
+        log.info(
+            "remote transcribed %.1fs in %.2fs (model=%s) -> %d chars",
+            data.get("duration_sec", 0),
+            data.get("inference_sec", 0),
+            data.get("model", "?"),
+            len(text),
+        )
+        return text
+
+    async def _transcribe_local(self, audio: np.ndarray, sample_rate: int) -> str:
+        # whisper.cpp expects float32 normalized [-1, 1] at 16 kHz
         if audio.dtype == np.int16:
             x = audio.astype(np.float32) / 32768.0
         else:
@@ -130,9 +185,9 @@ class Transcriber:
             self._ensure_model()
             segments = await loop.run_in_executor(None, self._model.transcribe, x)
         except Exception as e:
-            log.error("transcription failed: %s", e)
+            log.error("local transcription failed: %s", e)
             return ""
 
         text = " ".join(s.text.strip() for s in segments).strip()
-        log.info("transcribed %d sec → %d chars", len(audio) // 16000, len(text))
+        log.info("local transcribed %d sec -> %d chars", len(audio) // 16000, len(text))
         return text
