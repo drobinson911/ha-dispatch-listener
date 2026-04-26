@@ -49,7 +49,7 @@ def load_options() -> dict:
         "code_pattern": "",
         "learning_mode": True,
         "webhook_url": "",
-        "webhook_routes": {},
+        "webhook_routes": [],
         "transcribe_after_match": True,
         "transcribe_seconds": 30,
         "whisper_model": "base.en",
@@ -236,11 +236,23 @@ async def main() -> int:
     # Start rolling archive task if configured
     await archiver.start_rolling_task(audio_buffer)
 
+    # webhook_routes from HA addon options is a list of {code, url} objects;
+    # convert to dict for the Notifier
+    raw_routes = opts.get("webhook_routes", []) or []
+    if isinstance(raw_routes, dict):
+        routes_dict = raw_routes
+    else:
+        routes_dict = {
+            entry["code"]: entry["url"]
+            for entry in raw_routes
+            if isinstance(entry, dict) and entry.get("code") and entry.get("url")
+        }
+
     notifier = Notifier(
         webhook_url=opts.get("webhook_url", ""),
         match_codes=match_codes,
         learning_mode=bool(opts.get("learning_mode", True)),
-        webhook_routes=opts.get("webhook_routes", {}) or {},
+        webhook_routes=routes_dict,
     )
 
     phrase_matcher = PhraseMatcher(triggers=opts.get("phrase_triggers", []))

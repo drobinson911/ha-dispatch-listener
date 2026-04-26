@@ -26,7 +26,7 @@ options:
   code_pattern: ""
   learning_mode: true
   webhook_url: ""
-  webhook_routes: {}
+  webhook_routes: []
   transcribe_after_match: true
   transcribe_seconds: 30
   whisper_model: base.en
