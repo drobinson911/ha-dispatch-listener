@@ -37,7 +37,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 def load_options() -> dict:
@@ -49,6 +49,7 @@ def load_options() -> dict:
         "code_pattern": "",
         "learning_mode": True,
         "webhook_url": "",
+        "webhook_routes": {},
         "transcribe_after_match": True,
         "transcribe_seconds": 30,
         "whisper_model": "base.en",
@@ -239,6 +240,7 @@ async def main() -> int:
         webhook_url=opts.get("webhook_url", ""),
         match_codes=match_codes,
         learning_mode=bool(opts.get("learning_mode", True)),
+        webhook_routes=opts.get("webhook_routes", {}) or {},
     )
 
     phrase_matcher = PhraseMatcher(triggers=opts.get("phrase_triggers", []))
@@ -290,14 +292,22 @@ async def main() -> int:
         try:
             import datetime as dt
             import httpx
-            payload = {
-                "event": "pre_alert" if count >= 3 else "incident_update",
-                "beep_count": count,
-                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "source": "dispatch_listener",
-            }
+            from notifier import _is_discord_webhook
+            event_name = "pre_alert" if count >= 3 else "incident_update"
+            ts = dt.datetime.now(dt.timezone.utc).isoformat()
+            if _is_discord_webhook(url):
+                emoji = "🚨" if count >= 3 else "🔔"
+                label = "PRE-ALERT" if count >= 3 else "INCIDENT UPDATE"
+                body = {"content": f"{emoji} **{label}** — {count} beeps detected\n🕒 {ts}"}
+            else:
+                body = {
+                    "event": event_name,
+                    "beep_count": count,
+                    "timestamp": ts,
+                    "source": "dispatch_listener",
+                }
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.post(url, json=payload)
+                r = await client.post(url, json=body)
                 if r.status_code >= 400:
                     log.warning("beep webhook returned %s", r.status_code)
         except Exception as e:

@@ -3,11 +3,13 @@
 Behavior:
 - always log the event (info level)
 - if learning_mode: log only, no fires
-- otherwise: fire main webhook on code match (with transcript + phrase_matches)
-             AND fire any per-phrase webhooks for matched phrases
+- otherwise:
+    * Per-code routes (webhook_routes[code]) override the default webhook_url
+    * Falls back to webhook_url for matched codes without an explicit route
+    * Fires per-phrase webhooks (from phrase_triggers) regardless
 
-This keeps the addon decoupled from your HA automations — what you do with
-the webhook is up to you.
+Auto-detects Discord webhook URLs (containing `discord.com/api/webhooks`)
+and formats payloads as `{"content": "..."}` instead of structured JSON.
 """
 from __future__ import annotations
 
@@ -21,16 +23,61 @@ from phrase_matcher import PhraseTrigger
 log = logging.getLogger(__name__)
 
 
+def _is_discord_webhook(url: str) -> bool:
+    return "discord.com/api/webhooks" in url or "discordapp.com/api/webhooks" in url
+
+
+def _format_for_discord(payload: dict) -> dict:
+    """Convert structured payload into Discord-compatible markdown message."""
+    code = payload.get("code", "?")
+    matched = payload.get("matched_phrase")
+    transcript = (payload.get("transcript") or "").strip()
+    phrase_matches = payload.get("phrase_matches") or []
+    snapshot = payload.get("snapshot_path")
+    ts = payload.get("timestamp", "")
+
+    lines = []
+    if code == "<voice>":
+        lines.append(f"💬 **Voice phrase match: `{matched or '?'}`**")
+    elif matched:
+        lines.append(f"💬 **Phrase match: `{matched}`** (during dispatch `{code}`)")
+    elif code.startswith("<"):
+        lines.append(f"🔔 **Event: {code}**")
+    else:
+        lines.append(f"🚨 **DISPATCH DETECTED — code `{code}`**")
+
+    if phrase_matches and code != "<voice>":
+        lines.append(f"   Phrase matches: {', '.join(f'`{p}`' for p in phrase_matches)}")
+    if transcript:
+        # Discord limit: 2000 chars per message; transcript usually short
+        t = transcript if len(transcript) < 1500 else transcript[:1500] + "…"
+        lines.append(f"```\n{t}\n```")
+    if snapshot:
+        # Show only the basename for tidiness
+        from pathlib import Path
+        lines.append(f"📼 snapshot: `{Path(snapshot).name}`")
+    if ts:
+        lines.append(f"🕒 {ts}")
+
+    return {"content": "\n".join(lines)}
+
+
 class Notifier:
     def __init__(
         self,
         webhook_url: str,
         match_codes: set[str],
         learning_mode: bool,
+        webhook_routes: dict[str, str] | None = None,
     ) -> None:
         self.webhook_url = webhook_url.strip()
         self.match_codes = match_codes
         self.learning_mode = learning_mode
+        self.webhook_routes = {
+            k.strip(): v.strip()
+            for k, v in (webhook_routes or {}).items()
+            if k.strip() and v.strip()
+        }
 
     async def notify(
         self,
@@ -50,10 +97,25 @@ class Notifier:
             [t.phrase for t in phrase_matches],
         )
 
+        # In learning mode: webhook_routes still fire (so we can wire Discord
+        # for monitoring) but only for matched codes. Default webhook_url stays
+        # silent so users without per-code routes aren't spammed.
         if self.learning_mode:
-            # Log the transcript so you can see what whisper heard, but don't fire
             if transcript:
                 log.info("transcript: %s", transcript)
+            # Allow webhook_routes to fire even in learning mode (monitoring)
+            payload = {
+                "code": code,
+                "transcript": transcript,
+                "phrase_matches": [t.phrase for t in phrase_matches],
+                "snapshot_path": snapshot_path,
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source": "dispatch_listener",
+                "learning_mode": True,
+            }
+            route_url = self.webhook_routes.get(code)
+            if route_url:
+                await self._post(route_url, payload, label=f"route[{code}]")
             return
 
         payload = {
@@ -65,13 +127,16 @@ class Notifier:
             "source": "dispatch_listener",
         }
 
-        # Main webhook — fires on configured code match
-        if is_match and self.webhook_url:
+        # Per-code route takes precedence over the default webhook_url
+        route_url = self.webhook_routes.get(code)
+        if route_url:
+            await self._post(route_url, payload, label=f"route[{code}]")
+        elif is_match and self.webhook_url:
             await self._post(self.webhook_url, payload, label=f"code={code}")
-        elif is_match and not self.webhook_url:
-            log.warning("matched code %s but no webhook_url configured", code)
+        elif is_match:
+            log.warning("matched code %s but no webhook configured", code)
 
-        # Per-phrase webhooks — fire regardless of code match (if configured)
+        # Per-phrase webhooks
         for trigger in phrase_matches:
             if trigger.webhook_url:
                 phrase_payload = {
@@ -84,9 +149,11 @@ class Notifier:
 
     @staticmethod
     async def _post(url: str, payload: dict, label: str) -> None:
+        # Auto-format for Discord webhooks
+        body = _format_for_discord(payload) if _is_discord_webhook(url) else payload
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.post(url, json=payload)
+                r = await client.post(url, json=body)
                 if r.status_code >= 400:
                     log.warning("webhook (%s) returned %s: %s", label, r.status_code, r.text[:200])
                 else:

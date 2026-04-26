@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.6.0
+version: 0.6.1
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -26,6 +26,7 @@ options:
   code_pattern: ""
   learning_mode: true
   webhook_url: ""
+  webhook_routes: {}
   transcribe_after_match: true
   transcribe_seconds: 30
   whisper_model: base.en
@@ -60,6 +61,9 @@ schema:
   code_pattern: str
   learning_mode: bool
   webhook_url: str
+  webhook_routes:
+    - code: str
+      url: str
   transcribe_after_match: bool
   transcribe_seconds: int(5,300)
   whisper_model: list(tiny.en|base.en|small.en|tiny|base|small)
