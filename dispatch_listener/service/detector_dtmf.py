@@ -37,10 +37,11 @@ KEYPAD = (
 )
 
 # Tunables — tuned for radio dispatch DTMF (typically 80-200ms tones, clean signal)
-MIN_TONE_MS = 60          # tone must be present this long to count as a digit
-MAX_GAP_MS = 500          # >= this much silence after a digit closes the code
-INBAND_DOMINANCE = 4.0    # winning bin must be >= this much over 2nd-strongest in its band
-MIN_ABSOLUTE_AMP = 1e6    # absolute floor (squared magnitude scale)
+MIN_TONE_MS = 60                # tone must be present this long to count as a digit
+MAX_GAP_MS = 500                # >= this much silence after a digit closes the code
+INTER_DIGIT_SILENCE_MS = 15     # >= this much silence between same-digit tones counts them separately
+INBAND_DOMINANCE = 4.0          # winning bin must be >= this much over 2nd-strongest in its band
+MIN_ABSOLUTE_AMP = 1e6          # absolute floor (squared magnitude scale)
 
 
 def _goertzel_power(samples: np.ndarray, freq: float, sample_rate: int) -> float:
@@ -75,6 +76,11 @@ class DTMFDecoder:
         digit = self._detect_digit(chunk)
 
         if digit is not None:
+            # Any silence resets the "have I emitted current run yet" flag —
+            # so consecutive same-digit tones (e.g. "99" in "3992") each get
+            # their own emission rather than collapsing into one long "9".
+            if self._silence_ms >= INTER_DIGIT_SILENCE_MS:
+                self._last_emitted_digit = None
             self._silence_ms = 0.0
             if digit == self._current_digit:
                 self._current_digit_ms += chunk_ms

@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.5.1
+version: 0.6.0
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -31,6 +31,15 @@ options:
   whisper_model: base.en
   phrase_triggers: []
   audio_preprocess: true
+  beep_detection_enabled: true
+  beep_freq_hz: 1000.0
+  beep_freq_tolerance_hz: 50.0
+  beep_min_ms: 80
+  beep_max_ms: 400
+  beep_min_gap_ms: 30
+  beep_max_gap_ms: 350
+  beep_pre_alert_webhook_url: ""
+  beep_update_webhook_url: ""
   whisper_server_url: ""
   whisper_server_timeout_sec: 30.0
   continuous_transcription: false
@@ -58,6 +67,15 @@ schema:
     - phrase: str
       webhook_url: str?
   audio_preprocess: bool
+  beep_detection_enabled: bool
+  beep_freq_hz: float(100.0,4000.0)
+  beep_freq_tolerance_hz: float(5.0,500.0)
+  beep_min_ms: int(20,1000)
+  beep_max_ms: int(50,2000)
+  beep_min_gap_ms: int(10,1000)
+  beep_max_gap_ms: int(30,2000)
+  beep_pre_alert_webhook_url: str
+  beep_update_webhook_url: str
   whisper_server_url: str
   whisper_server_timeout_sec: float(1.0,300.0)
   continuous_transcription: bool

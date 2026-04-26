@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from audio_buffer import AudioBuffer
+from beep_detector import BeepDetector, BeepConfig
 from capture import PulseCapture, autodetect_source
 from detector_dtmf import DTMFDecoder
 from archiver import Archiver
@@ -36,7 +37,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 
 def load_options() -> dict:
@@ -53,6 +54,15 @@ def load_options() -> dict:
         "whisper_model": "base.en",
         "phrase_triggers": [],
         "audio_preprocess": True,
+        "beep_detection_enabled": True,
+        "beep_freq_hz": 1000.0,
+        "beep_freq_tolerance_hz": 50.0,
+        "beep_min_ms": 80,
+        "beep_max_ms": 400,
+        "beep_min_gap_ms": 30,
+        "beep_max_gap_ms": 350,
+        "beep_pre_alert_webhook_url": "",
+        "beep_update_webhook_url": "",
         "whisper_server_url": "",
         "whisper_server_timeout_sec": 30.0,
         "continuous_transcription": False,
@@ -167,6 +177,26 @@ async def main() -> int:
     decoder = DTMFDecoder(sample_rate=CAPTURE_RATE)
     capture = PulseCapture(source=pulse_source, sample_rate=CAPTURE_RATE, chunk_ms=20)
 
+    # Beep detector — opt-in via beep_detection_enabled
+    beep_detector: BeepDetector | None = None
+    if opts.get("beep_detection_enabled", True):
+        beep_cfg = BeepConfig(
+            sample_rate=CAPTURE_RATE,
+            chunk_ms=20,
+            target_freq_hz=float(opts.get("beep_freq_hz", 1000.0)),
+            freq_tolerance_hz=float(opts.get("beep_freq_tolerance_hz", 50.0)),
+            min_beep_ms=float(opts.get("beep_min_ms", 80)),
+            max_beep_ms=float(opts.get("beep_max_ms", 400)),
+            min_gap_ms=float(opts.get("beep_min_gap_ms", 30)),
+            max_gap_ms=float(opts.get("beep_max_gap_ms", 350)),
+        )
+        beep_detector = BeepDetector(cfg=beep_cfg)
+        log.info(
+            "beep detector enabled: %.0f Hz, %d-%d ms beep, %d-%d ms gap",
+            beep_cfg.target_freq_hz, beep_cfg.min_beep_ms, beep_cfg.max_beep_ms,
+            beep_cfg.min_gap_ms, beep_cfg.max_gap_ms,
+        )
+
     buffer_seconds = max(
         float(opts.get("archive_pre_seconds", 5)) + float(opts.get("archive_post_seconds", 25)),
         float(opts.get("transcribe_seconds", 30)),
@@ -250,9 +280,43 @@ async def main() -> int:
         len(opts.get("phrase_triggers", [])),
     )
 
+    # Pre-resolved beep webhook URLs
+    beep_pre_alert_url = (opts.get("beep_pre_alert_webhook_url") or "").strip()
+    beep_update_url = (opts.get("beep_update_webhook_url") or "").strip()
+
+    async def _fire_beep_webhook(url: str, count: int) -> None:
+        if not url:
+            return
+        try:
+            import datetime as dt
+            import httpx
+            payload = {
+                "event": "pre_alert" if count >= 3 else "incident_update",
+                "beep_count": count,
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source": "dispatch_listener",
+            }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code >= 400:
+                    log.warning("beep webhook returned %s", r.status_code)
+        except Exception as e:
+            log.warning("beep webhook failed: %s", e)
+
     # Main loop
     async for chunk in capture.stream():
         await audio_buffer.add(chunk)
+
+        # Beep detector — runs first so pre-alert fires fastest
+        if beep_detector is not None:
+            beep_detector.feed(chunk)
+            for n in beep_detector.drain_completed():
+                if n >= 3:
+                    log.info("PRE-ALERT detected (%d beeps)", n)
+                    asyncio.create_task(_fire_beep_webhook(beep_pre_alert_url, n))
+                elif n == 2:
+                    log.info("INCIDENT UPDATE detected (%d beeps)", n)
+                    asyncio.create_task(_fire_beep_webhook(beep_update_url, n))
 
         # DTMF
         decoder.feed(chunk)
