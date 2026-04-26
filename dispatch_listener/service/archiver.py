@@ -1,13 +1,22 @@
 """Audio archiver — writes WAV snapshots and/or rolling files to disk.
 
-Modes:
+`archive_mode` is now treated as a comma-separated list (or a single mode
+for backwards compatibility) — multiple modes can run simultaneously:
+
 - `off`                — never archive
-- `snapshot_on_match`  — write a snapshot only when a code matched in match_codes
+- `snapshot_on_match`  — write a snapshot when a code matched in match_codes
 - `snapshot_on_any`    — write a snapshot for every detected code
-- `rolling_30min`      — rotating buffer: writes 5-min files, keeps last 6 (= 30 min)
+- `rolling_30min`      — rotating buffer: writes 5-min files, keeps last 6
+
+Common combo: `snapshot_on_match,rolling_30min` — discrete files for your
+station's dispatches (training data, easy retrieval) PLUS continuous rolling
+coverage for everything else (other stations' calls, ambient context).
 
 Snapshots are pre/post the event:
    [pre_seconds before tone] [tone] [post_seconds after tone]
+
+Defaults: pre=25, post=25 — pre is large enough to capture the 3-beep
+pre-alert that fires ~10-15s before the actual DTMF tones.
 
 Filename conventions:
 - Triggered:  <YYYY-MM-DD_HH-MM-SS>_<code>.wav
@@ -31,6 +40,22 @@ ROLLING_FILE_SECONDS = 5 * 60   # 5-min files
 ROLLING_FILE_COUNT = 6          # keep 6 = 30 min coverage
 
 
+def _parse_modes(mode: str) -> set[str]:
+    """Accept comma-separated list or single mode. Filter to valid set."""
+    if not mode:
+        return {"off"}
+    parts = {m.strip() for m in mode.split(",") if m.strip()}
+    valid = parts & VALID_MODES
+    invalid = parts - VALID_MODES
+    if invalid:
+        log.warning("ignoring unknown archive_mode entries: %s", sorted(invalid))
+    if not valid:
+        return {"off"}
+    if "off" in valid and len(valid) > 1:
+        valid.discard("off")  # other modes override "off"
+    return valid
+
+
 class Archiver:
     def __init__(
         self,
@@ -39,24 +64,19 @@ class Archiver:
         sample_rate: int,
         match_codes: set[str],
     ) -> None:
-        if mode not in VALID_MODES:
-            log.warning("unknown archive_mode=%s, defaulting to off", mode)
-            mode = "off"
-        self.mode = mode
+        self.modes = _parse_modes(mode)
         self.dir = Path(directory)
         self.sample_rate = sample_rate
         self.match_codes = match_codes
-        if self.mode != "off":
+        if self.modes != {"off"}:
             self.dir.mkdir(parents=True, exist_ok=True)
+        log.info("archiver modes: %s", sorted(self.modes))
 
     def should_snapshot(self, code: str) -> bool:
-        if self.mode == "off":
-            return False
-        if self.mode == "snapshot_on_match":
-            return code in self.match_codes
-        if self.mode == "snapshot_on_any":
+        if "snapshot_on_any" in self.modes:
             return True
-        # rolling_30min handled separately by start_rolling_task
+        if "snapshot_on_match" in self.modes:
+            return code in self.match_codes
         return False
 
     def write_snapshot(self, code: str, audio: np.ndarray) -> Path | None:
@@ -81,8 +101,8 @@ class Archiver:
             return None
 
     async def start_rolling_task(self, audio_buffer) -> asyncio.Task | None:
-        """If mode=rolling_30min, start a background writer."""
-        if self.mode != "rolling_30min":
+        """If rolling_30min is among configured modes, start the background writer."""
+        if "rolling_30min" not in self.modes:
             return None
         return asyncio.create_task(self._rolling_loop(audio_buffer))
 

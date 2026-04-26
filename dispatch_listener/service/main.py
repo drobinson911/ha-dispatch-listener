@@ -37,7 +37,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 
 def load_options() -> dict:
@@ -71,9 +71,9 @@ def load_options() -> dict:
         "vad_activation_db": 12.0,
         "vad_min_burst_seconds": 0.5,
         "vad_max_burst_seconds": 60.0,
-        "archive_mode": "snapshot_on_match",
-        "archive_pre_seconds": 5,
-        "archive_post_seconds": 25,
+        "archive_mode": "snapshot_on_match,rolling_30min",
+        "archive_pre_seconds": 25,
+        "archive_post_seconds": 30,
         "snapshot_dir": "/share/dispatch_listener/captures",
         "log_level": "info",
     }
@@ -203,8 +203,8 @@ async def main() -> int:
         float(opts.get("archive_pre_seconds", 5)) + float(opts.get("archive_post_seconds", 25)),
         float(opts.get("transcribe_seconds", 30)),
     ) + 5.0
-    # If rolling archive is on, size buffer to hold one full rolling file (~5 min)
-    if opts.get("archive_mode") == "rolling_30min":
+    # If rolling archive is on (alone or combined), size buffer for ~5 min
+    if "rolling_30min" in (opts.get("archive_mode") or ""):
         buffer_seconds = max(buffer_seconds, 305.0)
     audio_buffer = AudioBuffer(max_seconds=buffer_seconds, sample_rate=CAPTURE_RATE)
     log.info("audio buffer sized for %.0f sec (~%d MB)", buffer_seconds, int(buffer_seconds * CAPTURE_RATE * 2 / 1024 / 1024))
