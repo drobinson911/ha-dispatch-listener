@@ -74,6 +74,10 @@ This add-on is a custom Home Assistant repository.
 | `transcribe_seconds` | `30` | How much post-tone audio to transcribe |
 | `whisper_model` | `base.en` | `tiny.en` / `base.en` / `small.en` (or non-`.en` for multilingual) |
 | `phrase_triggers` | `[]` | List of `{phrase, webhook_url?}`. Phrases are matched case-insensitive substrings against the transcript. |
+| `continuous_transcription` | `false` | When true, the addon transcribes every voice burst (not just post-tone audio) and runs phrase matching. Use this to catch dispatcher pre-alerts that happen BEFORE the tones drop. Adds ~250 MB persistent RAM and CPU only during voice bursts (not during silence). |
+| `vad_activation_db` | `12.0` | How many dB above the rolling noise floor a chunk must be to count as voice. Lower = more sensitive (more false bursts), higher = less sensitive (might miss soft speech). |
+| `vad_min_burst_seconds` | `0.5` | Voice bursts shorter than this are ignored as transients (squelch tails, clicks). |
+| `vad_max_burst_seconds` | `60.0` | Hard cap on a single burst — prevents runaway transcription if the radio gets stuck on. |
 | `archive_mode` | `snapshot_on_match` | `off` / `snapshot_on_match` / `snapshot_on_any` / `rolling_30min` |
 | `archive_pre_seconds` | `5` | Audio kept *before* the tone in the snapshot |
 | `archive_post_seconds` | `25` | Audio kept *after* the tone in the snapshot |
@@ -108,19 +112,21 @@ mobile app, log to a database, etc.
 
 ## Status
 
-**v0.2 — Phase 1+2:** Audio capture + DTMF decoder + Whisper transcription
-+ phrase triggers + audio archive + webhook fan-out.
+**v0.3 — Phase 1+2+3:** Audio capture + tightened DTMF decoder + post-tone
+Whisper transcription + **continuous transcription with VAD for pre-alert
+phrase detection** + phrase triggers + audio archive (snapshot or rolling
+30-min) + webhook fan-out.
 
 Designed to coexist with existing dispatch paths (CAD email, etc.) — start
 in additive mode, only replace the existing path once you trust accuracy.
 
 ### Roadmap
 
-- v0.3: live audio streaming endpoint (HTTP/HLS, on-demand)
-- v0.4: ingress UI for live activity / level meter / recent codes /
+- v0.4: live audio streaming endpoint (HTTP/HLS, on-demand)
+- v0.5: ingress UI for live activity / level meter / recent codes /
   transcripts
-- v0.5: additional tone systems (two-tone Plectron, 5-tone, single-tone)
-- v0.6: optional cloud Whisper fallback for higher accuracy
+- v0.6: additional tone systems (two-tone Plectron, 5-tone, single-tone)
+- v0.7: optional cloud Whisper fallback for higher accuracy
 
 ## Limitations
 

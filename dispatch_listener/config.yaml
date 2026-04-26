@@ -1,12 +1,12 @@
 name: Dispatch Listener
-version: 0.2.1
+version: 0.3.0
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
-  decodes dispatch tones (DTMF), transcribes the post-tone voice content
-  with local Whisper, and fires Home Assistant webhooks on configured
-  station codes or detected phrases. Works with any fire/EMS/police
-  dispatch system that uses tone-based unit alerting.
+  decodes dispatch tones (DTMF), continuously transcribes voice with local
+  Whisper for pre-alert phrase detection, and fires Home Assistant webhooks
+  on configured station codes or detected phrases. Works with any
+  fire/EMS/police dispatch system that uses tone-based unit alerting.
 url: https://github.com/drobinson911/ha-dispatch-listener
 arch:
   - aarch64
@@ -30,6 +30,10 @@ options:
   transcribe_seconds: 30
   whisper_model: base.en
   phrase_triggers: []
+  continuous_transcription: false
+  vad_activation_db: 12.0
+  vad_min_burst_seconds: 0.5
+  vad_max_burst_seconds: 60.0
   archive_mode: snapshot_on_match
   archive_pre_seconds: 5
   archive_post_seconds: 25
@@ -50,6 +54,10 @@ schema:
   phrase_triggers:
     - phrase: str
       webhook_url: str?
+  continuous_transcription: bool
+  vad_activation_db: float(3.0,30.0)
+  vad_min_burst_seconds: float(0.1,5.0)
+  vad_max_burst_seconds: float(5.0,300.0)
   archive_mode: list(off|snapshot_on_match|snapshot_on_any|rolling_30min)
   archive_pre_seconds: int(0,30)
   archive_post_seconds: int(0,300)
