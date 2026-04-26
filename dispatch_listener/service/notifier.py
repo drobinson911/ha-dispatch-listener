@@ -69,6 +69,7 @@ class Notifier:
         match_codes: set[str],
         learning_mode: bool,
         webhook_routes: dict[str, str] | None = None,
+        db_log_webhook_url: str = "",
     ) -> None:
         self.webhook_url = webhook_url.strip()
         self.match_codes = match_codes
@@ -78,6 +79,16 @@ class Notifier:
             for k, v in (webhook_routes or {}).items()
             if k.strip() and v.strip()
         }
+        self.db_log_webhook_url = db_log_webhook_url.strip()
+
+    async def log_event(self, event_type: str, payload: dict) -> None:
+        """Fire the unified DB-log webhook for any event (code/beep/phrase).
+        Independent of webhook_url / webhook_routes / learning_mode — always fires
+        if db_log_webhook_url is configured."""
+        if not self.db_log_webhook_url:
+            return
+        log_payload = {**payload, "event_type": event_type}
+        await self._post(self.db_log_webhook_url, log_payload, label=f"db_log[{event_type}]")
 
     async def notify(
         self,
@@ -97,37 +108,34 @@ class Notifier:
             [t.phrase for t in phrase_matches],
         )
 
-        # In learning mode: webhook_routes still fire (so we can wire Discord
-        # for monitoring) but only for matched codes. Default webhook_url stays
-        # silent so users without per-code routes aren't spammed.
-        if self.learning_mode:
-            if transcript:
-                log.info("transcript: %s", transcript)
-            # Allow webhook_routes to fire even in learning mode (monitoring)
-            payload = {
-                "code": code,
-                "transcript": transcript,
-                "phrase_matches": [t.phrase for t in phrase_matches],
-                "snapshot_path": snapshot_path,
-                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "source": "dispatch_listener",
-                "learning_mode": True,
-            }
-            route_url = self.webhook_routes.get(code)
-            if route_url:
-                await self._post(route_url, payload, label=f"route[{code}]")
-            return
-
         payload = {
             "code": code,
             "transcript": transcript,
             "phrase_matches": [t.phrase for t in phrase_matches],
             "snapshot_path": snapshot_path,
+            "is_match": is_match,
+            "learning_mode": self.learning_mode,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
             "source": "dispatch_listener",
         }
 
-        # Per-code route takes precedence over the default webhook_url
+        # ALWAYS log to DB if configured — independent of learning_mode + match
+        await self.log_event(
+            "phrase_match" if code == "<voice>" else "dtmf_code",
+            payload,
+        )
+
+        if self.learning_mode:
+            if transcript:
+                log.info("transcript: %s", transcript)
+            # In learning mode, route still fires (Discord monitoring); webhook_url stays silent
+            route_url = self.webhook_routes.get(code)
+            if route_url:
+                await self._post(route_url, payload, label=f"route[{code}]")
+            return
+
+        # Production mode: route + webhook_url + per-phrase all fire as appropriate
+        # Per-code route takes precedence over default webhook_url for matches
         route_url = self.webhook_routes.get(code)
         if route_url:
             await self._post(route_url, payload, label=f"route[{code}]")

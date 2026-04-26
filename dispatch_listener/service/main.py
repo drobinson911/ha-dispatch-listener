@@ -37,7 +37,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 
 def load_options() -> dict:
@@ -50,6 +50,7 @@ def load_options() -> dict:
         "learning_mode": True,
         "webhook_url": "",
         "webhook_routes": [],
+        "db_log_webhook_url": "",
         "transcribe_after_match": True,
         "transcribe_seconds": 30,
         "whisper_model": "base.en",
@@ -253,6 +254,7 @@ async def main() -> int:
         match_codes=match_codes,
         learning_mode=bool(opts.get("learning_mode", True)),
         webhook_routes=routes_dict,
+        db_log_webhook_url=opts.get("db_log_webhook_url", ""),
     )
 
     phrase_matcher = PhraseMatcher(triggers=opts.get("phrase_triggers", []))
@@ -339,6 +341,16 @@ async def main() -> int:
                 elif n == 2:
                     log.info("INCIDENT UPDATE detected (%d beeps)", n)
                     asyncio.create_task(_fire_beep_webhook(beep_update_url, n))
+                # ALSO log to DB regardless of beep-specific webhook config
+                event_type = "pre_alert" if n >= 3 else "incident_update"
+                asyncio.create_task(
+                    notifier.log_event(event_type, {
+                        "beep_count": n,
+                        "timestamp": __import__("datetime").datetime.now(
+                            __import__("datetime").timezone.utc).isoformat(),
+                        "source": "dispatch_listener",
+                    })
+                )
 
         # DTMF
         decoder.feed(chunk)
