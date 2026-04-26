@@ -36,7 +36,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 def load_options() -> dict:
@@ -52,6 +52,7 @@ def load_options() -> dict:
         "transcribe_seconds": 30,
         "whisper_model": "base.en",
         "phrase_triggers": [],
+        "audio_preprocess": True,
         "continuous_transcription": False,
         "vad_activation_db": 12.0,
         "vad_min_burst_seconds": 0.5,
@@ -176,7 +177,10 @@ async def main() -> int:
         opts.get("continuous_transcription", False)
     )
     if needs_transcriber:
-        transcriber = Transcriber(model_name=opts.get("whisper_model", "base.en"))
+        transcriber = Transcriber(
+            model_name=opts.get("whisper_model", "base.en"),
+            preprocess=bool(opts.get("audio_preprocess", True)),
+        )
         # Preload model if continuous mode — we want fast first-burst response
         if opts.get("continuous_transcription", False):
             log.info("continuous_transcription enabled — preloading whisper model now…")

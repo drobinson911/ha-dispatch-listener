@@ -5,6 +5,11 @@ Models cached in /data/models so they persist across addon restarts.
 
 Transcription is sync (whisper.cpp blocks); we run it in an executor so the
 asyncio capture loop isn't blocked while we transcribe ~30 sec of audio.
+
+Optional acoustic preprocessing: ffmpeg filter chain that bandpasses to
+voice range, denoises, levels loudness BEFORE handing to Whisper. Improves
+accuracy on noisy radio audio. ONLY runs on Whisper-bound audio — the
+DTMF decoder always reads the raw stream so tone detection is unaffected.
 """
 from __future__ import annotations
 
@@ -19,10 +24,21 @@ log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("/data/models")
 
+# ffmpeg filter chain for radio voice — see #3 in design notes
+PREPROCESS_FILTER_CHAIN = (
+    "highpass=f=300,"
+    "lowpass=f=3400,"
+    "afftdn=nf=-25,"
+    "compand=attacks=0.05:decays=0.4:"
+    "points=-90/-90|-30/-15|-10/-7|0/-3:soft-knee=6:gain=0,"
+    "loudnorm=I=-16:TP=-1.5:LRA=7"
+)
+
 
 class Transcriber:
-    def __init__(self, model_name: str = "base.en") -> None:
+    def __init__(self, model_name: str = "base.en", preprocess: bool = True) -> None:
         self.model_name = model_name
+        self.preprocess = preprocess
         self._model = None  # lazy-loaded on first use
 
     def _ensure_model(self):
@@ -42,10 +58,43 @@ class Transcriber:
         )
         log.info("whisper model %s loaded", self.model_name)
 
+    async def _preprocess_audio(self, audio_i16: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Run ffmpeg filter chain on int16 audio, return processed int16 array."""
+        cmd = [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "error",
+            "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i", "pipe:0",
+            "-af", PREPROCESS_FILTER_CHAIN,
+            "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(audio_i16.tobytes())
+        if proc.returncode != 0:
+            log.warning("preprocess failed: %s", stderr.decode("utf-8", errors="replace")[-200:])
+            return audio_i16  # fallback to raw
+        return np.frombuffer(stdout, dtype=np.int16)
+
     async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         """Transcribe a numpy audio array to text."""
         if len(audio) == 0:
             return ""
+
+        # Optional acoustic preprocessing — bandpass + denoise + loudnorm + downsample to 16k
+        if self.preprocess:
+            audio_i16 = audio if audio.dtype == np.int16 else (audio * 32767).astype(np.int16)
+            try:
+                processed = await self._preprocess_audio(audio_i16, sample_rate)
+                audio = processed
+                sample_rate = 16000  # preprocess always outputs 16 kHz for whisper
+            except FileNotFoundError:
+                log.warning("ffmpeg not found — skipping preprocessing")
+            except Exception as e:
+                log.warning("preprocess error %s — using raw audio", e)
 
         # whisper expects float32 normalized [-1, 1] at 16 kHz
         if audio.dtype == np.int16:
@@ -68,5 +117,5 @@ class Transcriber:
             return ""
 
         text = " ".join(s.text.strip() for s in segments).strip()
-        log.info("transcribed %d sec → %d chars", len(audio) // sample_rate, len(text))
+        log.info("transcribed %d sec → %d chars", len(audio) // 16000, len(text))
         return text

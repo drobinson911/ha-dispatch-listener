@@ -7,6 +7,7 @@ ENV LANG=C.UTF-8 PYTHONUNBUFFERED=1
 RUN apk add --no-cache \
       python3 py3-pip py3-numpy \
       pulseaudio-utils alsa-lib \
+      ffmpeg \
       tini
 
 # Build deps for pywhispercpp (compiles whisper.cpp from source)
