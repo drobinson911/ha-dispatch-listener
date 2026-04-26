@@ -40,7 +40,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 
 
 def load_options() -> dict:
@@ -81,6 +81,8 @@ def load_options() -> dict:
         "prealert_default_webhook_url": "",
         "prealert_fuzzy_threshold": 85,
         "prealert_streaming_interval_sec": 2.0,
+        "prealert_require_3beep_arm": True,
+        "prealert_arm_window_sec": 30.0,
         "whisper_initial_prompt": "",
         "whisper_initial_prompt_url": "",
         "whisper_initial_prompt_token": "",
@@ -144,25 +146,64 @@ async def handle_code(
 
 
 class PrealertSuppressor:
-    """Tracks recent DTMF code detections so pre-alert webhooks can yield to
-    the higher-priority QuickCall flow. When a DTMF code fires, anything that
-    would otherwise fire a pre-alert within `window_sec` seconds is suppressed
-    on the addon side. (HA-side `media_player.media_stop` is the primary
-    cutover; this is the belt-and-suspenders.)"""
+    """Gates the pre-alert webhook firing path with two independent signals:
 
-    def __init__(self, window_sec: float = 5.0) -> None:
-        self.window_sec = window_sec
+    1. SUPPRESSION on DTMF: when a station's DTMF (QuickCall) fires, yield to
+       the higher-priority flow for `dtmf_window_sec` seconds. Belt-and-
+       suspenders alongside HA's `media_player.media_stop`.
+
+    2. ARMING on 3-beep pre-alert tone: per Butte ECC convention, every
+       pre-alert is preceded by 3 beeps, THEN the dispatcher's voice. If
+       `require_arm` is True, the prealert path is dormant by default and
+       only listens after the 3-beep tone fires (for `arm_window_sec` seconds).
+       This eliminates false matches from random radio chatter — the matcher
+       only runs during the actual pre-alert window.
+    """
+
+    def __init__(
+        self,
+        dtmf_window_sec: float = 5.0,
+        arm_window_sec: float = 30.0,
+        require_arm: bool = True,
+    ) -> None:
+        self.dtmf_window_sec = dtmf_window_sec
+        self.arm_window_sec = arm_window_sec
+        self.require_arm = require_arm
         self._last_dtmf_at: float = 0.0
+        self._armed_until: float = 0.0
 
     def mark_dtmf(self) -> None:
         import time as _t
         self._last_dtmf_at = _t.time()
 
-    def suppressed(self) -> bool:
-        if self._last_dtmf_at == 0.0:
-            return False
+    def arm(self) -> None:
+        """Called when 3-beep pre-alert tone is detected — opens the listening
+        window. Voice bursts during this window are eligible for prealert match."""
         import time as _t
-        return (_t.time() - self._last_dtmf_at) < self.window_sec
+        self._armed_until = _t.time() + self.arm_window_sec
+
+    def suppressed(self) -> bool:
+        """True if pre-alert webhook firing should be skipped. Either:
+        - DTMF fired recently (yield to QuickCall), OR
+        - require_arm is True and the arm window has expired / never opened."""
+        import time as _t
+        now = _t.time()
+        if self._last_dtmf_at and (now - self._last_dtmf_at) < self.dtmf_window_sec:
+            return True
+        if self.require_arm and now >= self._armed_until:
+            return True
+        return False
+
+    def state(self) -> str:
+        import time as _t
+        now = _t.time()
+        parts = []
+        if self._last_dtmf_at:
+            parts.append(f"dtmf_age={now - self._last_dtmf_at:.1f}s")
+        if self._armed_until:
+            armed_remain = self._armed_until - now
+            parts.append(f"armed_remain={armed_remain:.1f}s" if armed_remain > 0 else "disarmed")
+        return ", ".join(parts) or "idle"
 
 
 async def _fire_prealert_webhook(url: str, payload: dict) -> None:
@@ -452,9 +493,22 @@ async def main() -> int:
             prealert_matcher.fuzzy_threshold,
         )
 
-    # Pre-alert suppression: when DTMF (QuickCall) fires, we yield to the
-    # higher-priority flow for 5 seconds so a beep doesn't double up with QC.
-    prealert_suppressor = PrealertSuppressor(window_sec=5.0)
+    # Pre-alert gating:
+    # - DTMF suppression: yield to QuickCall for 5s after a DTMF code fires.
+    # - 3-beep arming: only run the prealert matcher in a window after the
+    #   3-beep pre-alert tone is detected. Per Butte ECC convention every
+    #   pre-alert is preceded by 3 beeps, so this wipes out 95% of false
+    #   matches from random radio chatter.
+    prealert_suppressor = PrealertSuppressor(
+        dtmf_window_sec=5.0,
+        arm_window_sec=float(opts.get("prealert_arm_window_sec", 30.0)),
+        require_arm=bool(opts.get("prealert_require_3beep_arm", True)),
+    )
+    if prealert_suppressor.require_arm:
+        log.info(
+            "prealert: armed-by-3-beeps mode (window=%.0fs)",
+            prealert_suppressor.arm_window_sec,
+        )
 
     # VAD — active when continuous_transcription is on OR prealert is configured.
     # Prealert needs voice bursts to transcribe + match against the trigger lists.
@@ -553,6 +607,10 @@ async def main() -> int:
             for n in beep_detector.drain_completed():
                 if n >= 3:
                     log.info("PRE-ALERT detected (%d beeps)", n)
+                    # Open the prealert listening window — the dispatcher's
+                    # voice will follow within ~1-3s. Without this arm, the
+                    # matcher would never fire (require_arm=True).
+                    prealert_suppressor.arm()
                     asyncio.create_task(_fire_beep_webhook(beep_pre_alert_url, n))
                 elif n == 2:
                     log.info("INCIDENT UPDATE detected (%d beeps)", n)

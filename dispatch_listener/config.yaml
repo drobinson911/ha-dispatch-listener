@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.8.1
+version: 0.8.2
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -59,6 +59,8 @@ options:
   prealert_default_webhook_url: ""
   prealert_fuzzy_threshold: 85
   prealert_streaming_interval_sec: 2.0
+  prealert_require_3beep_arm: true
+  prealert_arm_window_sec: 30.0
   whisper_initial_prompt: ""
   whisper_initial_prompt_url: ""
   whisper_initial_prompt_token: ""
@@ -125,6 +127,8 @@ schema:
   prealert_default_webhook_url: str
   prealert_fuzzy_threshold: int(0,100)
   prealert_streaming_interval_sec: float(0.5,30.0)
+  prealert_require_3beep_arm: bool
+  prealert_arm_window_sec: float(5.0,300.0)
   whisper_initial_prompt: str
   whisper_initial_prompt_url: str
   whisper_initial_prompt_token: str
