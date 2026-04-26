@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.6.3
+version: 0.7.0
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -18,6 +18,10 @@ homeassistant_api: false
 host_network: false
 map:
   - share:rw
+ports:
+  8765/tcp: 8765
+ports_description:
+  8765/tcp: Live audio MP3 stream (when stream_enabled=true)
 options:
   pulse_source: auto
   input_gain_db: 0
@@ -52,6 +56,9 @@ options:
   archive_pre_seconds: 25
   archive_post_seconds: 30
   snapshot_dir: /share/dispatch_listener/captures
+  stream_enabled: false
+  stream_port: 8765
+  stream_bitrate_kbps: 96
   log_level: info
 schema:
   pulse_source: str
@@ -92,4 +99,7 @@ schema:
   archive_pre_seconds: int(0,30)
   archive_post_seconds: int(0,300)
   snapshot_dir: str
+  stream_enabled: bool
+  stream_port: port
+  stream_bitrate_kbps: int(32,256)
   log_level: list(debug|info|warning|error)

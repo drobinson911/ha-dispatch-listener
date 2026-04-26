@@ -30,6 +30,7 @@ from detector_dtmf import DTMFDecoder
 from archiver import Archiver
 from notifier import Notifier
 from phrase_matcher import PhraseMatcher
+from streamer import StreamServer
 from transcriber import Transcriber
 from vad import VAD, VADConfig
 
@@ -37,7 +38,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.6.3"
+VERSION = "0.7.0"
 
 
 def load_options() -> dict:
@@ -75,6 +76,9 @@ def load_options() -> dict:
         "archive_pre_seconds": 25,
         "archive_post_seconds": 30,
         "snapshot_dir": "/share/dispatch_listener/captures",
+        "stream_enabled": False,
+        "stream_port": 8765,
+        "stream_bitrate_kbps": 96,
         "log_level": "info",
     }
     if OPTIONS_PATH.exists():
@@ -282,6 +286,20 @@ async def main() -> int:
     code_re = re.compile(code_pattern) if code_pattern else None
     if code_re:
         log.info("code_pattern active: codes not matching /%s/ will be dropped", code_pattern)
+
+    # Live audio streaming (optional, on-demand ffmpeg)
+    stream_server: StreamServer | None = None
+    if opts.get("stream_enabled", False):
+        stream_server = StreamServer(
+            pulse_source=pulse_source,
+            port=int(opts.get("stream_port", 8765)),
+            bitrate_kbps=int(opts.get("stream_bitrate_kbps", 96)),
+        )
+        await stream_server.start()
+        log.info(
+            "live audio streaming enabled at http://0.0.0.0:%d/stream.mp3 (%d kbps MP3)",
+            stream_server.port, stream_server.bitrate_kbps,
+        )
 
     log.info(
         "config: source=%s match_codes=%s learning=%s transcribe_match=%s "
