@@ -20,13 +20,15 @@ class AudioBuffer:
         self.max_samples = int(max_seconds * sample_rate)
         self.sample_rate = sample_rate
         self._chunks: deque[np.ndarray] = deque()
-        self._total_samples = 0
+        self._total_samples = 0     # samples currently in the buffer (capped at max_samples)
+        self._cumulative_added = 0  # samples ever added — monotonically increasing
         self._cond = asyncio.Condition()
 
     async def add(self, chunk: np.ndarray) -> None:
         async with self._cond:
             self._chunks.append(chunk)
             self._total_samples += len(chunk)
+            self._cumulative_added += len(chunk)
             while self._total_samples > self.max_samples and self._chunks:
                 old = self._chunks.popleft()
                 self._total_samples -= len(old)
@@ -43,10 +45,11 @@ class AudioBuffer:
         return joined
 
     async def wait_for_seconds_after(self, seconds: float) -> None:
-        """Block until `seconds` of new audio has been added."""
-        target = self._total_samples + int(seconds * self.sample_rate)
+        """Block until `seconds` of new audio has been added (uses the cumulative
+        counter so this works even when the wait window > buffer's max_samples)."""
+        target = self._cumulative_added + int(seconds * self.sample_rate)
         async with self._cond:
-            while self._total_samples < target:
+            while self._cumulative_added < target:
                 await self._cond.wait()
 
     @property

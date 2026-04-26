@@ -36,7 +36,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 def load_options() -> dict:
@@ -171,7 +171,11 @@ async def main() -> int:
         float(opts.get("archive_pre_seconds", 5)) + float(opts.get("archive_post_seconds", 25)),
         float(opts.get("transcribe_seconds", 30)),
     ) + 5.0
+    # If rolling archive is on, size buffer to hold one full rolling file (~5 min)
+    if opts.get("archive_mode") == "rolling_30min":
+        buffer_seconds = max(buffer_seconds, 305.0)
     audio_buffer = AudioBuffer(max_seconds=buffer_seconds, sample_rate=CAPTURE_RATE)
+    log.info("audio buffer sized for %.0f sec (~%d MB)", buffer_seconds, int(buffer_seconds * CAPTURE_RATE * 2 / 1024 / 1024))
 
     # Whisper transcriber — needed by either the post-tone path OR continuous mode
     transcriber: Transcriber | None = None
