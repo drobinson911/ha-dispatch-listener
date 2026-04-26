@@ -136,26 +136,33 @@ class PreAlertMatcher:
         return s
 
     def _phrase_hit(self, phrase: str, normalized_text: str) -> tuple[bool, float]:
-        """Return (hit, confidence). Exact substring → 1.0, fuzzy → score/100."""
+        """Return (hit, confidence). Word-boundary exact → 1.0, fuzzy → score/100.
+
+        Word-boundary matching matters: phrases like "tc" (Traffic Collision in
+        radio shorthand) would otherwise match every "tch" / "watch" in the
+        transcript via substring. Also prevents "structure" matching
+        "structures" / "infrastructure".
+        """
         if not phrase:
             return False, 0.0
-        # 1. Exact substring (cheap, common case)
-        if phrase in normalized_text:
+        # 1. Word-boundary exact match (cheap, common case)
+        if re.search(r"\b" + re.escape(phrase) + r"\b", normalized_text):
             return True, 1.0
-        # 2. Fuzzy fallback (typo / mistranscription tolerance)
-        if HAS_RAPIDFUZZ and self.fuzzy_threshold > 0:
+        # 2. Fuzzy fallback (typo / mistranscription tolerance) — skip for
+        # very short phrases where partial_ratio over-matches.
+        if HAS_RAPIDFUZZ and self.fuzzy_threshold > 0 and len(phrase) >= 5:
             score = fuzz.partial_ratio(phrase, normalized_text)
             if score >= self.fuzzy_threshold:
                 return True, score / 100.0
         return False, 0.0
 
     def _phrase_position(self, phrase: str, normalized_text: str) -> int:
-        """Return the starting char index of the FIRST occurrence of phrase in
-        the normalized text, or -1 if not found. Used for ordering constraints."""
+        """Return the starting char index of the FIRST word-boundary occurrence
+        of phrase in the normalized text, or -1 if not found."""
         if not phrase:
             return -1
-        idx = normalized_text.find(phrase)
-        return idx
+        m = re.search(r"\b" + re.escape(phrase) + r"\b", normalized_text)
+        return m.start() if m else -1
 
     def _earliest_area_position(self, normalized_text: str) -> int:
         """Char index of the earliest area-phrase hit, or -1 if none."""
