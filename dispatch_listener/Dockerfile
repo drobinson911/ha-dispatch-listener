@@ -3,21 +3,22 @@ FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 PYTHONUNBUFFERED=1
 
-# Audio + Python deps
+# Runtime audio + Python
 RUN apk add --no-cache \
       python3 py3-pip py3-numpy \
       pulseaudio-utils alsa-lib \
       tini
 
-# App deps
+# Build deps for pywhispercpp (compiles whisper.cpp from source)
+RUN apk add --no-cache --virtual .build-deps \
+      build-base cmake git python3-dev
+
 COPY service/requirements.txt /opt/dispatch_listener/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages \
-      -r /opt/dispatch_listener/requirements.txt
+      -r /opt/dispatch_listener/requirements.txt \
+    && apk del .build-deps
 
-# App code
 COPY service/ /opt/dispatch_listener/
-
-# s6 service script (runs at container start)
 COPY rootfs/ /
 
 ENTRYPOINT ["/sbin/tini", "--"]

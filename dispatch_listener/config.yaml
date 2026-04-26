@@ -1,11 +1,12 @@
 name: Dispatch Listener
-version: 0.1.0
+version: 0.2.0
 slug: dispatch_listener
 description: >
-  Listens to a radio/scanner audio feed (via USB sound card → PulseAudio),
-  decodes dispatch tones (DTMF, more to come), and fires a Home Assistant
-  webhook when a configured station code is heard. Generic — works with any
-  fire/EMS/police dispatch system that uses tone-based unit alerting.
+  Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
+  decodes dispatch tones (DTMF), transcribes the post-tone voice content
+  with local Whisper, and fires Home Assistant webhooks on configured
+  station codes or detected phrases. Works with any fire/EMS/police
+  dispatch system that uses tone-based unit alerting.
 url: https://github.com/drobinson911/ha-dispatch-listener
 arch:
   - aarch64
@@ -15,6 +16,8 @@ init: false
 audio: true
 homeassistant_api: false
 host_network: false
+map:
+  - share:rw
 options:
   pulse_source: auto
   input_gain_db: 0
@@ -22,9 +25,13 @@ options:
   match_codes: []
   learning_mode: true
   webhook_url: ""
-  buffer_seconds: 1800
-  snapshot_pre_seconds: 5
-  snapshot_post_seconds: 25
+  transcribe_after_match: true
+  transcribe_seconds: 30
+  whisper_model: base.en
+  phrase_triggers: []
+  archive_mode: snapshot_on_match
+  archive_pre_seconds: 5
+  archive_post_seconds: 25
   snapshot_dir: /share/dispatch_listener/captures
   log_level: info
 schema:
@@ -35,10 +42,14 @@ schema:
     - str
   learning_mode: bool
   webhook_url: str
-  buffer_seconds: int(60,7200)
-  snapshot_pre_seconds: int(0,30)
-  snapshot_post_seconds: int(0,300)
+  transcribe_after_match: bool
+  transcribe_seconds: int(5,300)
+  whisper_model: list(tiny.en|base.en|small.en|tiny|base|small)
+  phrase_triggers:
+    - phrase: str
+      webhook_url: str?
+  archive_mode: list(off|snapshot_on_match|snapshot_on_any|rolling_30min)
+  archive_pre_seconds: int(0,30)
+  archive_post_seconds: int(0,300)
   snapshot_dir: str
   log_level: list(debug|info|warning|error)
-map:
-  - share:rw

@@ -16,8 +16,13 @@ dispatch but doesn't bake in any agency-specific config.
   Plectron, single-tone, 5-tone) planned
 - Logs every detected code so you can build up a catalog of which codes
   belong to which units
-- Fires an HA webhook on configured matches → integrate however you want
-  (alert lights, PA announcement, mobile push, MariaDB log, etc.)
+- **Transcribes the post-tone voice content** with local Whisper (whisper.cpp,
+  no cloud, no PyTorch — runs on a Pi)
+- **Phrase / keyword detection** on the transcript — fire separate webhooks
+  for things like "structure fire", "code 3", specific street names
+- **Audio archive** — snapshot WAV around each event, or 30-min rolling buffer
+- Fires an HA webhook on configured matches with the full payload
+  (code + transcript + phrase matches + snapshot path)
 
 ## How it works
 
@@ -64,10 +69,14 @@ This add-on is a custom Home Assistant repository.
 | `match_codes` | `[]` | List of codes that should fire the webhook. Empty list + learning_mode = catalog mode. |
 | `learning_mode` | `true` | When true, every detected code is logged but NO webhook fires. Use this for the first ~week to discover all your local codes safely. |
 | `webhook_url` | `""` | Full HA webhook URL (e.g. `http://homeassistant:8123/api/webhook/<id>`). Required when learning_mode is off. |
-| `buffer_seconds` | `1800` | Reserved for the rolling buffer feature (not yet implemented in v0.1) |
-| `snapshot_pre_seconds` | `5` | Reserved (not yet implemented) |
-| `snapshot_post_seconds` | `25` | Reserved |
-| `snapshot_dir` | `/share/dispatch_listener/captures` | Reserved |
+| `transcribe_after_match` | `true` | Run Whisper on the post-tone audio. In learning_mode, transcribes every code; in production mode, only matched codes (saves CPU). |
+| `transcribe_seconds` | `30` | How much post-tone audio to transcribe |
+| `whisper_model` | `base.en` | `tiny.en` / `base.en` / `small.en` (or non-`.en` for multilingual) |
+| `phrase_triggers` | `[]` | List of `{phrase, webhook_url?}`. Phrases are matched case-insensitive substrings against the transcript. |
+| `archive_mode` | `snapshot_on_match` | `off` / `snapshot_on_match` / `snapshot_on_any` / `rolling_30min` |
+| `archive_pre_seconds` | `5` | Audio kept *before* the tone in the snapshot |
+| `archive_post_seconds` | `25` | Audio kept *after* the tone in the snapshot |
+| `snapshot_dir` | `/share/dispatch_listener/captures` | Where snapshot WAVs are written (mapped to your HA `/share`) |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error` |
 
 ### Recommended first run
@@ -84,26 +93,33 @@ This add-on is a custom Home Assistant repository.
 ```json
 {
   "code": "3901",
+  "transcript": "Station 91 first out and medics, Engine 91 respond Code 3 to 1234 Oroville Dam Blvd cross of Bridge St for a structure fire, smoke showing from a single story residential",
+  "phrase_matches": ["structure fire"],
+  "snapshot_path": "/share/dispatch_listener/captures/2026-04-25_22-50-13_3901.wav",
   "timestamp": "2026-04-25T22:50:13.402345+00:00",
   "source": "dispatch_listener"
 }
 ```
 
 Wire up an HA automation triggered by the webhook to do whatever you want
-on dispatch.
+on dispatch — color the alert lights by call type, push transcripts to a
+mobile app, log to a database, etc.
 
 ## Status
 
-**v0.1 — Phase 1a:** Audio capture + DTMF decoder + webhook on match.
+**v0.2 — Phase 1+2:** Audio capture + DTMF decoder + Whisper transcription
++ phrase triggers + audio archive + webhook fan-out.
+
 Designed to coexist with existing dispatch paths (CAD email, etc.) — start
 in additive mode, only replace the existing path once you trust accuracy.
 
 ### Roadmap
 
-- v0.2: rolling audio buffer + auto-snapshot WAV around detection events
-- v0.3: ingress UI for live activity / level meter / recent codes
-- v0.4: additional tone systems (two-tone Plectron, 5-tone, single-tone)
-- v0.5: optional Whisper-based voice transcription of post-tone audio
+- v0.3: live audio streaming endpoint (HTTP/HLS, on-demand)
+- v0.4: ingress UI for live activity / level meter / recent codes /
+  transcripts
+- v0.5: additional tone systems (two-tone Plectron, 5-tone, single-tone)
+- v0.6: optional cloud Whisper fallback for higher accuracy
 
 ## Limitations
 

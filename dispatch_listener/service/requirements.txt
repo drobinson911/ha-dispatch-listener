@@ -1,1 +1,2 @@
 httpx>=0.27
+pywhispercpp>=1.2
