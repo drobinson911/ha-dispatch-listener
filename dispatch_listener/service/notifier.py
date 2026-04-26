@@ -70,10 +70,12 @@ class Notifier:
         learning_mode: bool,
         webhook_routes: dict[str, str] | None = None,
         db_log_webhook_url: str = "",
+        notify_all_codes: bool = False,
     ) -> None:
         self.webhook_url = webhook_url.strip()
         self.match_codes = match_codes
         self.learning_mode = learning_mode
+        self.notify_all_codes = notify_all_codes
         self.webhook_routes = {
             k.strip(): v.strip()
             for k, v in (webhook_routes or {}).items()
@@ -128,14 +130,16 @@ class Notifier:
         if self.learning_mode:
             if transcript:
                 log.info("transcript: %s", transcript)
-            # In learning mode, route still fires (Discord monitoring); webhook_url stays silent
+            # In learning mode, routes still fire; webhook_url only fires if notify_all_codes
             route_url = self.webhook_routes.get(code)
             if route_url:
                 await self._post(route_url, payload, label=f"route[{code}]")
+            elif self.notify_all_codes and self.webhook_url:
+                await self._post(self.webhook_url, payload, label=f"all[{code}]")
             return
 
         # Production mode: route + webhook_url + per-phrase all fire as appropriate
-        # Per-code route takes precedence over default webhook_url for matches
+        # Per-code route takes precedence; notify_all_codes fires webhook_url for every detection
         route_url = self.webhook_routes.get(code)
         if route_url:
             await self._post(route_url, payload, label=f"route[{code}]")
@@ -143,6 +147,8 @@ class Notifier:
             await self._post(self.webhook_url, payload, label=f"code={code}")
         elif is_match:
             log.warning("matched code %s but no webhook configured", code)
+        elif self.notify_all_codes and self.webhook_url:
+            await self._post(self.webhook_url, payload, label=f"all[{code}]")
 
         # Per-phrase webhooks
         for trigger in phrase_matches:

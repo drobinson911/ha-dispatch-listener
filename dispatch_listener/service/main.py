@@ -38,7 +38,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 
 def load_options() -> dict:
@@ -49,6 +49,7 @@ def load_options() -> dict:
         "match_codes": [],
         "code_pattern": "",
         "learning_mode": True,
+        "notify_all_codes": False,
         "webhook_url": "",
         "webhook_routes": [],
         "db_log_webhook_url": "",
@@ -258,6 +259,7 @@ async def main() -> int:
         webhook_url=opts.get("webhook_url", ""),
         match_codes=match_codes,
         learning_mode=bool(opts.get("learning_mode", True)),
+        notify_all_codes=bool(opts.get("notify_all_codes", False)),
         webhook_routes=routes_dict,
         db_log_webhook_url=opts.get("db_log_webhook_url", ""),
     )
