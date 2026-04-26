@@ -26,10 +26,12 @@ class StreamServer:
         pulse_source: str,
         port: int = 8765,
         bitrate_kbps: int = 96,
+        secret: str = "",
     ) -> None:
         self.pulse_source = pulse_source
         self.port = port
         self.bitrate_kbps = bitrate_kbps
+        self.secret = secret.strip()
         self._listeners: list[asyncio.Queue[bytes]] = []
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
@@ -54,6 +56,11 @@ class StreamServer:
             self._runner = None
 
     async def _stream_handler(self, request: web.Request) -> web.StreamResponse:
+        # Optional shared-secret gate. URL form: /stream.mp3?token=<secret>
+        if self.secret:
+            token = request.query.get("token") or request.headers.get("X-Stream-Token", "")
+            if token != self.secret:
+                return web.Response(status=401, text="unauthorized")
         q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
         await self._add_listener(q)
         peer = request.headers.get("X-Forwarded-For") or request.remote

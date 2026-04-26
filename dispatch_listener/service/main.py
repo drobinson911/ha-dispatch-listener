@@ -38,7 +38,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 
 def load_options() -> dict:
@@ -79,6 +79,7 @@ def load_options() -> dict:
         "stream_enabled": False,
         "stream_port": 8765,
         "stream_bitrate_kbps": 96,
+        "stream_secret": "",
         "log_level": "info",
     }
     if OPTIONS_PATH.exists():
@@ -294,11 +295,13 @@ async def main() -> int:
             pulse_source=pulse_source,
             port=int(opts.get("stream_port", 8765)),
             bitrate_kbps=int(opts.get("stream_bitrate_kbps", 96)),
+            secret=opts.get("stream_secret", ""),
         )
         await stream_server.start()
+        auth_note = "auth: token required" if stream_server.secret else "auth: NONE (open)"
         log.info(
-            "live audio streaming enabled at http://0.0.0.0:%d/stream.mp3 (%d kbps MP3)",
-            stream_server.port, stream_server.bitrate_kbps,
+            "live audio streaming enabled at http://0.0.0.0:%d/stream.mp3 (%d kbps MP3, %s)",
+            stream_server.port, stream_server.bitrate_kbps, auth_note,
         )
 
     log.info(

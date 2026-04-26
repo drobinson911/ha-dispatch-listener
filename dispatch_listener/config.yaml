@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.7.0
+version: 0.7.1
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -59,6 +59,7 @@ options:
   stream_enabled: false
   stream_port: 8765
   stream_bitrate_kbps: 96
+  stream_secret: ""
   log_level: info
 schema:
   pulse_source: str
@@ -102,4 +103,5 @@ schema:
   stream_enabled: bool
   stream_port: port
   stream_bitrate_kbps: int(32,256)
+  stream_secret: str
   log_level: list(debug|info|warning|error)
