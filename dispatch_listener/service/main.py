@@ -28,8 +28,10 @@ from beep_detector import BeepDetector, BeepConfig
 from capture import PulseCapture, autodetect_source
 from detector_dtmf import DTMFDecoder
 from archiver import Archiver
+from logbook_client import LogbookBiasClient
 from notifier import Notifier
 from phrase_matcher import PhraseMatcher
+from prealert_matcher import PreAlertMatch, PreAlertMatcher
 from streamer import StreamServer
 from transcriber import Transcriber
 from vad import VAD, VADConfig
@@ -38,7 +40,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.7.2"
+VERSION = "0.8.0"
 
 
 def load_options() -> dict:
@@ -73,6 +75,16 @@ def load_options() -> dict:
         "vad_activation_db": 12.0,
         "vad_min_burst_seconds": 0.5,
         "vad_max_burst_seconds": 60.0,
+        "prealert_areas": [],
+        "prealert_for_us_phrases": [],
+        "prealert_call_types": [],
+        "prealert_default_webhook_url": "",
+        "prealert_fuzzy_threshold": 85,
+        "prealert_streaming_interval_sec": 2.0,
+        "whisper_initial_prompt": "",
+        "whisper_initial_prompt_url": "",
+        "whisper_initial_prompt_token": "",
+        "whisper_initial_prompt_refresh_hours": 24,
         "archive_mode": "snapshot_on_match,rolling_30min",
         "archive_pre_seconds": 25,
         "archive_post_seconds": 30,
@@ -131,14 +143,131 @@ async def handle_code(
     )
 
 
+class PrealertSuppressor:
+    """Tracks recent DTMF code detections so pre-alert webhooks can yield to
+    the higher-priority QuickCall flow. When a DTMF code fires, anything that
+    would otherwise fire a pre-alert within `window_sec` seconds is suppressed
+    on the addon side. (HA-side `media_player.media_stop` is the primary
+    cutover; this is the belt-and-suspenders.)"""
+
+    def __init__(self, window_sec: float = 5.0) -> None:
+        self.window_sec = window_sec
+        self._last_dtmf_at: float = 0.0
+
+    def mark_dtmf(self) -> None:
+        import time as _t
+        self._last_dtmf_at = _t.time()
+
+    def suppressed(self) -> bool:
+        if self._last_dtmf_at == 0.0:
+            return False
+        import time as _t
+        return (_t.time() - self._last_dtmf_at) < self.window_sec
+
+
+async def _fire_prealert_webhook(url: str, payload: dict) -> None:
+    """Fire-and-forget POST for pre-alert webhooks. Kept tiny + fast on purpose —
+    HA needs to see this within ~1s of the trigger words being spoken."""
+    if not url:
+        return
+    log = logging.getLogger("prealert.webhook")
+    try:
+        import httpx
+        from notifier import _is_discord_webhook
+        if _is_discord_webhook(url):
+            label = payload.get("call_type", "?").upper()
+            for_us = payload.get("matched_for_us", "")
+            body = {"content": f"🚨 **PRE-ALERT — {label}** (for-us: `{for_us}`)"}
+        else:
+            body = payload
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(url, json=body)
+            if r.status_code >= 400:
+                log.warning("prealert webhook returned %s: %s", r.status_code, r.text[:200])
+            else:
+                log.info(
+                    "prealert webhook fired type=%s status=%s",
+                    payload.get("call_type"), r.status_code,
+                )
+    except Exception as e:
+        log.warning("prealert webhook failed: %s", e)
+
+
+async def _interim_prealert_pass(
+    audio: np.ndarray,
+    *,
+    transcriber: Transcriber,
+    matcher: PreAlertMatcher,
+    notifier: Notifier,
+    fired_set: set[str],
+    suppressor: PrealertSuppressor | None = None,
+) -> None:
+    """Mid-burst transcription pass — runs every N seconds while a voice burst
+    is still ongoing. The point is to fire the HA pre-alert webhook the *instant*
+    we have enough words to identify both for-us and call-type, instead of
+    waiting for the dispatcher to finish talking. fired_set deduplicates so we
+    don't re-fire each interim pass."""
+    if not matcher.configured or fired_set:
+        return
+    if suppressor is not None and suppressor.suppressed():
+        return  # QuickCall just fired — yield to the priority path
+    transcript = await transcriber.transcribe(audio, CAPTURE_RATE)
+    if not transcript:
+        return
+    log = logging.getLogger("prealert.interim")
+    log.debug("interim transcript: %s", transcript)
+    if suppressor is not None and suppressor.suppressed():
+        return  # check again after the awaitable — QuickCall could have fired in the meantime
+    await _try_prealert(transcript, matcher=matcher, notifier=notifier, fired_set=fired_set)
+
+
+async def _try_prealert(
+    transcript: str,
+    *,
+    matcher: PreAlertMatcher,
+    notifier: Notifier,
+    fired_set: set[str],
+) -> PreAlertMatch | None:
+    """Run the 2-stage prealert match. Fire ONCE per call_type per burst.
+    `fired_set` is mutated to track what's already been fired this burst."""
+    if not matcher.configured:
+        return None
+    match = matcher.match(transcript)
+    if not match:
+        return None
+    if match.call_type in fired_set:
+        return match  # already fired for this burst
+    fired_set.add(match.call_type)
+
+    log = logging.getLogger("prealert")
+    log.info(
+        "PRE-ALERT match: call_type=%s for_us=%s phrase=%s conf=%.2f",
+        match.call_type, match.matched_for_us, match.matched_call_phrase, match.confidence,
+    )
+    payload = {
+        "call_type": match.call_type,
+        "matched_for_us": match.matched_for_us,
+        "matched_call_phrase": match.matched_call_phrase,
+        "confidence": match.confidence,
+        "transcript": transcript,
+        "source": "dispatch_listener",
+    }
+    asyncio.create_task(_fire_prealert_webhook(match.webhook_url, payload))
+    asyncio.create_task(notifier.log_event("prealert", payload))
+    return match
+
+
 async def handle_burst(
     burst_audio: np.ndarray,
     *,
     transcriber: Transcriber,
     notifier: Notifier,
     phrase_matcher: PhraseMatcher,
+    prealert_matcher: PreAlertMatcher | None = None,
+    fired_call_types: set[str] | None = None,
+    suppressor: PrealertSuppressor | None = None,
 ) -> None:
-    """Pre-alert path: transcribe a voice burst, fire phrase webhooks on match."""
+    """Pre-alert path: transcribe a voice burst, fire phrase + prealert webhooks on match."""
     log = logging.getLogger("handler.burst")
     seconds = len(burst_audio) / CAPTURE_RATE
     log.info("transcribing voice burst (%.1fs)", seconds)
@@ -148,6 +277,18 @@ async def handle_burst(
         return
 
     log.info("burst transcript: %s", transcript)
+
+    # 2-stage pre-alert match (FAST path) — fires before generic phrase webhooks.
+    # fired_call_types is a per-burst dedupe set so streaming transcription doesn't
+    # re-fire the same category every 2 seconds.
+    if prealert_matcher is not None and (suppressor is None or not suppressor.suppressed()):
+        await _try_prealert(
+            transcript,
+            matcher=prealert_matcher,
+            notifier=notifier,
+            fired_set=fired_call_types if fired_call_types is not None else set(),
+        )
+
     matches = phrase_matcher.find_matches(transcript)
     if matches:
         # Reuse notifier to fire per-phrase webhooks. code="<voice>" indicates
@@ -215,20 +356,50 @@ async def main() -> int:
     audio_buffer = AudioBuffer(max_seconds=buffer_seconds, sample_rate=CAPTURE_RATE)
     log.info("audio buffer sized for %.0f sec (~%d MB)", buffer_seconds, int(buffer_seconds * CAPTURE_RATE * 2 / 1024 / 1024))
 
-    # Whisper transcriber — needed by either the post-tone path OR continuous mode
+    # Whisper transcriber — needed by post-tone path, continuous mode, OR prealert
     transcriber: Transcriber | None = None
-    needs_transcriber = bool(opts.get("transcribe_after_match", True)) or bool(
-        opts.get("continuous_transcription", False)
+    prealert_configured = (
+        bool(opts.get("prealert_for_us_phrases")) or bool(opts.get("prealert_areas"))
+    ) and (
+        bool(opts.get("prealert_call_types")) or bool(opts.get("prealert_default_webhook_url"))
     )
+    needs_transcriber = (
+        bool(opts.get("transcribe_after_match", True))
+        or bool(opts.get("continuous_transcription", False))
+        or prealert_configured
+    )
+    # Whisper bias prompt: a static string from config, OR pulled from the
+    # logbook D1 (units / call types / street names). Logbook source wins if
+    # configured — it auto-refreshes as new streets/calls accumulate.
+    static_prompt = (opts.get("whisper_initial_prompt") or "").strip()
+    bias_client = LogbookBiasClient(
+        base_url=opts.get("whisper_initial_prompt_url", "") or "",
+        token=opts.get("whisper_initial_prompt_token", "") or "",
+        refresh_hours=float(opts.get("whisper_initial_prompt_refresh_hours", 24)),
+    )
+
+    def _prompt_provider() -> str:
+        # Prefer the live D1-derived prompt; fall back to the static config one.
+        return bias_client.prompt or static_prompt
+
     if needs_transcriber:
         transcriber = Transcriber(
             model_name=opts.get("whisper_model", "base.en"),
             preprocess=bool(opts.get("audio_preprocess", True)),
             server_url=opts.get("whisper_server_url", ""),
             server_timeout_sec=float(opts.get("whisper_server_timeout_sec", 30.0)),
+            initial_prompt_provider=_prompt_provider,
         )
         if transcriber.server_url:
             log.info("whisper remote server configured: %s (local fallback ready)", transcriber.server_url)
+        if bias_client.configured:
+            log.info(
+                "whisper initial_prompt source: logbook (%s, refresh every %.1fh)",
+                bias_client.base_url, bias_client.refresh_seconds / 3600.0,
+            )
+            await bias_client.start_periodic_refresh()
+        elif static_prompt:
+            log.info("whisper initial_prompt source: static config (%d chars)", len(static_prompt))
         # Preload local model if continuous mode + no remote — fast first-burst response
         if opts.get("continuous_transcription", False) and not transcriber.server_url:
             log.info("continuous_transcription enabled (local mode) — preloading whisper model…")
@@ -266,10 +437,32 @@ async def main() -> int:
 
     phrase_matcher = PhraseMatcher(triggers=opts.get("phrase_triggers", []))
 
-    # VAD — only active when continuous_transcription is on
+    prealert_matcher = PreAlertMatcher(
+        for_us_phrases=opts.get("prealert_for_us_phrases", []) or [],
+        areas=opts.get("prealert_areas", []) or [],
+        call_types=opts.get("prealert_call_types", []) or [],
+        fuzzy_threshold=int(opts.get("prealert_fuzzy_threshold", 85)),
+        default_webhook_url=opts.get("prealert_default_webhook_url", "") or "",
+    )
+    if prealert_matcher.configured:
+        log.info(
+            "prealert matcher: %d for-us phrases, %d call types, fuzzy=%d",
+            len(prealert_matcher.for_us_phrases),
+            len(prealert_matcher.call_types),
+            prealert_matcher.fuzzy_threshold,
+        )
+
+    # Pre-alert suppression: when DTMF (QuickCall) fires, we yield to the
+    # higher-priority flow for 5 seconds so a beep doesn't double up with QC.
+    prealert_suppressor = PrealertSuppressor(window_sec=5.0)
+
+    # VAD — active when continuous_transcription is on OR prealert is configured.
+    # Prealert needs voice bursts to transcribe + match against the trigger lists.
     vad: VAD | None = None
     burst_chunks: list[np.ndarray] = []
-    if opts.get("continuous_transcription", False):
+    burst_fired_call_types: set[str] = set()
+    burst_chunks_since_last_interim: int = 0
+    if opts.get("continuous_transcription", False) or prealert_configured:
         vad_cfg = VADConfig(
             sample_rate=CAPTURE_RATE,
             chunk_ms=20,
@@ -382,6 +575,9 @@ async def main() -> int:
                 log.debug("dropping code %s (does not match pattern)", code)
                 continue
             log.info("dispatch code detected: %s", code)
+            # Mark suppression: any in-flight or imminent prealert webhook
+            # for the next 5 seconds is yielded to the QuickCall flow.
+            prealert_suppressor.mark_dtmf()
             asyncio.create_task(
                 handle_code(
                     code,
@@ -394,20 +590,59 @@ async def main() -> int:
                 )
             )
 
-        # VAD / continuous transcription
+        # VAD / continuous transcription / streaming prealert
         if vad is not None and transcriber is not None:
             event, _rms_db = vad.feed(chunk)
+            if event == "burst_start":
+                burst_fired_call_types = set()
+                burst_chunks_since_last_interim = 0
             if vad.in_burst or event == "burst_end":
                 burst_chunks.append(chunk)
+                burst_chunks_since_last_interim += 1
+
+            # Streaming/incremental transcription during a long burst:
+            # every N seconds while still in_burst, transcribe what we have so far
+            # and run prealert match. This lets us fire the HA pre-alert webhook
+            # WHILE the dispatcher is still talking, instead of waiting for them
+            # to stop speaking.
+            if (
+                vad.in_burst
+                and prealert_matcher.configured
+                and burst_chunks
+                and len(burst_fired_call_types) == 0  # already fired? no need to keep transcribing
+            ):
+                interim_sec = float(opts.get("prealert_streaming_interval_sec", 2.0))
+                interim_chunks_threshold = max(1, int(interim_sec * 1000 / 20))  # 20ms chunks
+                if burst_chunks_since_last_interim >= interim_chunks_threshold:
+                    burst_chunks_since_last_interim = 0
+                    interim_audio = np.concatenate(burst_chunks)
+                    asyncio.create_task(
+                        _interim_prealert_pass(
+                            interim_audio,
+                            transcriber=transcriber,
+                            matcher=prealert_matcher,
+                            notifier=notifier,
+                            fired_set=burst_fired_call_types,
+                            suppressor=prealert_suppressor,
+                        )
+                    )
+
             if event == "burst_end" and burst_chunks:
                 burst_audio = np.concatenate(burst_chunks)
                 burst_chunks = []
+                # capture the per-burst dedupe set for the final pass + reset for next burst
+                fired_set_for_burst = burst_fired_call_types
+                burst_fired_call_types = set()
+                burst_chunks_since_last_interim = 0
                 asyncio.create_task(
                     handle_burst(
                         burst_audio,
                         transcriber=transcriber,
                         notifier=notifier,
                         phrase_matcher=phrase_matcher,
+                        prealert_matcher=prealert_matcher if prealert_matcher.configured else None,
+                        fired_call_types=fired_set_for_burst,
+                        suppressor=prealert_suppressor,
                     )
                 )
 

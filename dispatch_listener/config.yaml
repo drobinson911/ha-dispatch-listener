@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.7.2
+version: 0.8.0
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -53,6 +53,16 @@ options:
   vad_activation_db: 12.0
   vad_min_burst_seconds: 0.5
   vad_max_burst_seconds: 60.0
+  prealert_areas: []
+  prealert_for_us_phrases: []
+  prealert_call_types: []
+  prealert_default_webhook_url: ""
+  prealert_fuzzy_threshold: 85
+  prealert_streaming_interval_sec: 2.0
+  whisper_initial_prompt: ""
+  whisper_initial_prompt_url: ""
+  whisper_initial_prompt_token: ""
+  whisper_initial_prompt_refresh_hours: 24
   archive_mode: "snapshot_on_match,rolling_30min"
   archive_pre_seconds: 25
   archive_post_seconds: 30
@@ -98,6 +108,27 @@ schema:
   vad_activation_db: float(3.0,30.0)
   vad_min_burst_seconds: float(0.1,5.0)
   vad_max_burst_seconds: float(5.0,300.0)
+  prealert_areas:
+    - str
+  prealert_for_us_phrases:
+    - str
+  prealert_call_types:
+    - type: str
+      phrases:
+        - str
+      webhook_url: str?
+      priority: int?
+      must_follow_area: bool?
+      not_followed_by:
+        - str?
+      negative_window_words: int?
+  prealert_default_webhook_url: str
+  prealert_fuzzy_threshold: int(0,100)
+  prealert_streaming_interval_sec: float(0.5,30.0)
+  whisper_initial_prompt: str
+  whisper_initial_prompt_url: str
+  whisper_initial_prompt_token: str
+  whisper_initial_prompt_refresh_hours: int(0,168)
   archive_mode: str
   archive_pre_seconds: int(0,30)
   archive_post_seconds: int(0,300)
