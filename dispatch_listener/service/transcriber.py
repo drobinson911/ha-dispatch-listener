@@ -40,6 +40,11 @@ class Transcriber:
         self.model_name = model_name
         self.preprocess = preprocess
         self._model = None  # lazy-loaded on first use
+        # whisper.cpp's Model object is NOT thread/reentrant safe. If two
+        # voice bursts overlap (e.g., back-to-back transmissions), parallel
+        # calls into model.transcribe() crash with a GGML_ASSERT. Serialize
+        # all transcription calls through this lock — bursts queue up.
+        self._lock: asyncio.Lock | None = None
 
     def _ensure_model(self):
         if self._model is not None:
@@ -80,10 +85,22 @@ class Transcriber:
         return np.frombuffer(stdout, dtype=np.int16)
 
     async def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
-        """Transcribe a numpy audio array to text."""
+        """Transcribe a numpy audio array to text. Serialized via lock — overlapping
+        bursts queue up to avoid the whisper.cpp non-reentrant crash."""
         if len(audio) == 0:
             return ""
 
+        # Lazy-init the lock so we can construct Transcriber outside an event loop
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+
+        # Acquire the model lock for the entire preprocess+transcribe critical section.
+        # This serializes all whisper calls; bursts queue. Cheap because radio audio
+        # is mostly silence anyway.
+        async with self._lock:
+            return await self._transcribe_locked(audio, sample_rate)
+
+    async def _transcribe_locked(self, audio: np.ndarray, sample_rate: int) -> str:
         # Optional acoustic preprocessing — bandpass + denoise + loudnorm + downsample to 16k
         if self.preprocess:
             audio_i16 = audio if audio.dtype == np.int16 else (audio * 32767).astype(np.int16)

@@ -36,7 +36,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 
 def load_options() -> dict:
