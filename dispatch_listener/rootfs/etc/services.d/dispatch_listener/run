@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -e
+cd /opt/dispatch_listener
+exec python3 -m main

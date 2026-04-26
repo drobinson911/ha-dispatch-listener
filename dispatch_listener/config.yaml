@@ -1,0 +1,44 @@
+name: Dispatch Listener
+version: 0.1.0
+slug: dispatch_listener
+description: >
+  Listens to a radio/scanner audio feed (via USB sound card → PulseAudio),
+  decodes dispatch tones (DTMF, more to come), and fires a Home Assistant
+  webhook when a configured station code is heard. Generic — works with any
+  fire/EMS/police dispatch system that uses tone-based unit alerting.
+url: https://github.com/drobinson911/ha-dispatch-listener
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+audio: true
+homeassistant_api: false
+host_network: false
+options:
+  pulse_source: auto
+  input_gain_db: 0
+  tone_system: dtmf
+  match_codes: []
+  learning_mode: true
+  webhook_url: ""
+  buffer_seconds: 1800
+  snapshot_pre_seconds: 5
+  snapshot_post_seconds: 25
+  snapshot_dir: /share/dispatch_listener/captures
+  log_level: info
+schema:
+  pulse_source: str
+  input_gain_db: float(-20.0,20.0)
+  tone_system: list(dtmf)
+  match_codes:
+    - str
+  learning_mode: bool
+  webhook_url: str
+  buffer_seconds: int(60,7200)
+  snapshot_pre_seconds: int(0,30)
+  snapshot_post_seconds: int(0,300)
+  snapshot_dir: str
+  log_level: list(debug|info|warning|error)
+map:
+  - share:rw
