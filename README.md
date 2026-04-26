@@ -67,6 +67,7 @@ This add-on is a custom Home Assistant repository.
 | `input_gain_db` | `0` | Software gain trim in dB (placeholder; v0.1 doesn't apply it yet — set hardware gain via `pactl set-source-volume`) |
 | `tone_system` | `dtmf` | Detection algorithm. Currently only `dtmf`. |
 | `match_codes` | `[]` | List of codes that should fire the webhook. Empty list + learning_mode = catalog mode. |
+| `code_pattern` | `""` | Optional regex to filter detected codes. Codes that don't match are dropped silently. Useful for filtering false positives — e.g. `^\d{4}$` to require exactly 4 digits, or `^39\d{2}$` for CAL FIRE Butte's 39XX format. Empty string = no filtering. |
 | `learning_mode` | `true` | When true, every detected code is logged but NO webhook fires. Use this for the first ~week to discover all your local codes safely. |
 | `webhook_url` | `""` | Full HA webhook URL (e.g. `http://homeassistant:8123/api/webhook/<id>`). Required when learning_mode is off. |
 | `transcribe_after_match` | `true` | Run Whisper on the post-tone audio. In learning_mode, transcribes every code; in production mode, only matched codes (saves CPU). |

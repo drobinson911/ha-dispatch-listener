@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,7 @@ def load_options() -> dict:
         "input_gain_db": 0.0,
         "tone_system": "dtmf",
         "match_codes": [],
+        "code_pattern": "",
         "learning_mode": True,
         "webhook_url": "",
         "transcribe_after_match": True,
@@ -175,12 +177,21 @@ async def main() -> int:
         len(opts.get("phrase_triggers", [])),
     )
 
+    # Optional regex filter for codes — drops noise codes silently
+    code_pattern = opts.get("code_pattern", "").strip()
+    code_re = re.compile(code_pattern) if code_pattern else None
+    if code_re:
+        log.info("code_pattern active: codes not matching /%s/ will be dropped", code_pattern)
+
     # Main capture + dispatch loop
     async for chunk in capture.stream():
         await audio_buffer.add(chunk)
         for digit in decoder.feed(chunk):
             log.debug("digit: %s", digit)
         for code in decoder.drain_completed_codes():
+            if code_re and not code_re.fullmatch(code):
+                log.debug("dropping code %s (does not match pattern)", code)
+                continue
             log.info("dispatch code detected: %s", code)
             asyncio.create_task(
                 handle_code(
