@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 
 
 def load_options() -> dict:
@@ -192,8 +192,9 @@ class PrealertSuppressor:
         self._first_burst_done = False
 
     def mark_first_burst_done(self) -> None:
-        """Called from the burst_end → handle_burst task's done callback.
-        After this fires, no further bursts in the arm window can match."""
+        """Hard-disarm signal — set when DTMF code detected (official end
+        of the pre-alert) or when HA's Shelly endpoint is hit. After this,
+        no further bursts in the arm window match. Reset on next arm()."""
         self._first_burst_done = True
 
     def suppressed(self) -> bool:
@@ -756,9 +757,13 @@ async def main() -> int:
                 log.debug("dropping code %s (does not match pattern)", code)
                 continue
             log.info("dispatch code detected: %s", code)
-            # Mark suppression: any in-flight or imminent prealert webhook
-            # for the next 5 seconds is yielded to the QuickCall flow.
+            # DTMF tones drop AFTER the dispatcher finishes the pre-alert.
+            # Per Donald's rule: "leave [the arm window] open until the
+            # tones (3901, 3992, etc)". So a DTMF code is the official
+            # end of the pre-alert window — full disarm, not just 5s.
             prealert_suppressor.mark_dtmf()
+            prealert_suppressor.mark_first_burst_done()  # full disarm
+            prealert_suppressor._armed_until = 0.0
             asyncio.create_task(
                 handle_code(
                     code,
@@ -812,18 +817,12 @@ async def main() -> int:
                 burst_audio = np.concatenate(burst_chunks)
                 burst_chunks = []
                 burst_chunks_since_last_interim = 0
-                # If we were ARMED at burst_end, this is THE pre-alert burst.
-                # Donald's rule: "the only info we care about is after the
-                # 3 beeps; when they stop talking, that's the end of the
-                # pre-alert." So mark first-burst-done after this task
-                # completes — any further bursts during the arm window are
-                # not pre-alert (unit acks, dispatcher re-reads, etc.).
-                was_armed_at_burst_end = (
-                    prealert_matcher.configured
-                    and prealert_suppressor._armed_until > 0.0
-                    and not prealert_suppressor._first_burst_done
-                )
-                burst_task = asyncio.create_task(
+                # Don't disarm on burst_end — the dispatcher's transmission
+                # can span multiple bursts (brief pauses become VAD burst
+                # boundaries). arm_fired_call_types prevents the same beep
+                # from firing twice. Only the DTMF tones (3901/3992) end
+                # the pre-alert window definitively.
+                asyncio.create_task(
                     handle_burst(
                         burst_audio,
                         transcriber=transcriber,
@@ -835,10 +834,6 @@ async def main() -> int:
                         transcript_log=arm_transcript_log,
                     )
                 )
-                if was_armed_at_burst_end:
-                    burst_task.add_done_callback(
-                        lambda _t: prealert_suppressor.mark_first_burst_done()
-                    )
 
     return 0
 

@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.9.3
+version: 0.9.4
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
