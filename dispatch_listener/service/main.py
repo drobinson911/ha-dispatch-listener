@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 
 
 def load_options() -> dict:
@@ -139,15 +139,22 @@ async def handle_code(
     elif arm_transcript_log:
         # transcribe_after_match disabled — pull the transcript from what
         # Deepgram captured during the arm window (the prealert content).
-        # Each entry has {ts, transcript, matched_call_type, matched_for_us,
-        # confidence}. Concatenate unique transcripts in order, deduping
-        # consecutive duplicates from interim passes.
-        seen: list[str] = []
+        # Pick the LONGEST transcript — early interim passes are short and
+        # often garbled (1-3s audio with little context), while later/final
+        # bursts contain the dispatcher's full readout cleanly. Showing only
+        # the longest gives the cleanest Discord post.
+        longest = ""
         for entry in arm_transcript_log:
             t = (entry.get("transcript") or "").strip()
-            if t and (not seen or seen[-1] != t):
-                seen.append(t)
-        transcript = " | ".join(seen).strip()
+            if len(t) > len(longest):
+                longest = t
+        transcript = longest
+
+    # Apply known Deepgram mishearing corrections — observed-in-the-wild
+    # substitutions where the dispatcher said one thing and Deepgram heard
+    # something else. Add new mappings here as patterns emerge from the
+    # prealert snapshot JSON sidecars over time.
+    transcript = _fixup_known_mishearings(transcript)
 
     matches = phrase_matcher.find_matches(transcript)
     snapshot_path = archiver.write_snapshot(code, snapshot_audio)
@@ -264,6 +271,32 @@ async def _fire_prealert_webhook(url: str, payload: dict) -> None:
                 )
     except Exception as e:
         log.warning("prealert webhook failed: %s", e)
+
+
+_KNOWN_MISHEARINGS: list[tuple[str, str]] = [
+    # (pattern, replacement) — case-insensitive substring match. Order matters
+    # for compound replacements: do "Carmel City" before bare "Carmel" etc.
+    # Sourced from observed Deepgram outputs on real Butte ECC dispatch audio.
+    ("Carmel City", "Oroville City"),
+    ("Carnival City", "Oroville City"),
+    ("Orbital Dials", "Oroville Dialysis"),
+    ("Orbital", "Oroville"),
+    # Standalone "Dials" only when adjacent to medical context — too risky to
+    # blanket-replace without context. Skipped for now.
+]
+
+
+def _fixup_known_mishearings(text: str) -> str:
+    """Apply observed Deepgram mishearing corrections case-insensitively.
+    Preserves the casing of the input by only swapping the matched substring."""
+    if not text:
+        return text
+    out = text
+    for pattern, replacement in _KNOWN_MISHEARINGS:
+        # Case-insensitive replace via regex
+        import re as _re
+        out = _re.sub(_re.escape(pattern), replacement, out, flags=_re.IGNORECASE)
+    return out
 
 
 async def _capture_prealert_snapshot(
