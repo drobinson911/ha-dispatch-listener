@@ -40,7 +40,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 
 
 def load_options() -> dict:
@@ -232,6 +232,36 @@ async def _fire_prealert_webhook(url: str, payload: dict) -> None:
                 )
     except Exception as e:
         log.warning("prealert webhook failed: %s", e)
+
+
+async def _capture_prealert_snapshot(
+    *,
+    audio_buffer: AudioBuffer,
+    archiver: Archiver,
+    wait_sec: float,
+    pre_sec: float,
+    fired_set: set[str],
+    whisper_model_name: str,
+) -> None:
+    """After 3-beep tone fires, wait for the arm window to expire, then save
+    a WAV + JSON sidecar of what the addon heard. Sidecar includes whether
+    the matcher fired and which call_type. This is "ground truth" for
+    auditing accuracy and (later) building fine-tuning data."""
+    log = logging.getLogger("prealert.snapshot")
+    try:
+        await audio_buffer.wait_for_seconds_after(wait_sec)
+    except Exception as e:
+        log.warning("snapshot wait failed: %s", e)
+        return
+    audio = audio_buffer.snapshot_tail(pre_sec + wait_sec)
+    sidecar = {
+        "fired_call_types": sorted(fired_set),
+        "matched": bool(fired_set),
+        "whisper_model_local_fallback": whisper_model_name,
+        "wait_window_sec": wait_sec,
+        "pre_sec": pre_sec,
+    }
+    archiver.write_prealert_snapshot(audio, sidecar=sidecar)
 
 
 async def _interim_prealert_pass(
@@ -612,6 +642,22 @@ async def main() -> int:
                     # matcher would never fire (require_arm=True).
                     prealert_suppressor.arm()
                     asyncio.create_task(_fire_beep_webhook(beep_pre_alert_url, n))
+                    # Schedule a delayed snapshot+sidecar capture: wait for
+                    # the dispatcher's transmission to finish (arm window),
+                    # then dump the post-tone audio + matcher decision to
+                    # disk for later analysis. Builds a labeled corpus of
+                    # real pre-alert events without manual labeling.
+                    if archiver.should_snapshot_prealert():
+                        asyncio.create_task(
+                            _capture_prealert_snapshot(
+                                audio_buffer=audio_buffer,
+                                archiver=archiver,
+                                wait_sec=float(opts.get("prealert_arm_window_sec", 90.0)),
+                                pre_sec=float(opts.get("archive_pre_seconds", 25)),
+                                fired_set=burst_fired_call_types,
+                                whisper_model_name=str(opts.get("whisper_model", "?")),
+                            )
+                        )
                 elif n == 2:
                     log.info("INCIDENT UPDATE detected (%d beeps)", n)
                     asyncio.create_task(_fire_beep_webhook(beep_update_url, n))

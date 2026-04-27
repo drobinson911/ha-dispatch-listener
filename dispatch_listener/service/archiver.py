@@ -6,6 +6,9 @@ for backwards compatibility) — multiple modes can run simultaneously:
 - `off`                — never archive
 - `snapshot_on_match`  — write a snapshot when a code matched in match_codes
 - `snapshot_on_any`    — write a snapshot for every detected code
+- `snapshot_on_prealert` — write a snapshot every time the 3-beep tone fires,
+                           with a JSON sidecar containing transcript + matcher
+                           decision. Builds a labeled training corpus.
 - `rolling_30min`      — rotating buffer: writes 5-min files, keeps last 6
 
 Common combo: `snapshot_on_match,rolling_30min` — discrete files for your
@@ -34,7 +37,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-VALID_MODES = {"off", "snapshot_on_match", "snapshot_on_any", "rolling_30min"}
+VALID_MODES = {"off", "snapshot_on_match", "snapshot_on_any", "snapshot_on_prealert", "rolling_30min"}
 
 ROLLING_FILE_SECONDS = 5 * 60   # 5-min files
 ROLLING_FILE_COUNT = 6          # keep 6 = 30 min coverage
@@ -99,6 +102,55 @@ class Archiver:
         except OSError as e:
             log.error("snapshot write failed: %s", e)
             return None
+
+    def should_snapshot_prealert(self) -> bool:
+        return "snapshot_on_prealert" in self.modes
+
+    def write_prealert_snapshot(
+        self,
+        audio: np.ndarray,
+        sidecar: dict | None = None,
+    ) -> Path | None:
+        """Write a WAV snapshot triggered by 3-beep pre-alert tone, plus an
+        optional JSON sidecar with transcript / matcher decision / model used.
+        Used to build a labeled corpus of real pre-alert events for analysis
+        and (later) STT fine-tuning."""
+        if not self.should_snapshot_prealert():
+            return None
+        if len(audio) == 0:
+            return None
+        import json as _json
+        ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = self.dir / f"{ts}_prealert.wav"
+        try:
+            with wave.open(str(path), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self.sample_rate)
+                if audio.dtype != np.int16:
+                    audio = audio.astype(np.int16)
+                w.writeframes(audio.tobytes())
+            log.info(
+                "prealert snapshot saved: %s (%d sec)", path.name,
+                len(audio) // self.sample_rate,
+            )
+        except OSError as e:
+            log.error("prealert snapshot write failed: %s", e)
+            return None
+
+        if sidecar:
+            try:
+                json_path = path.with_suffix(".json")
+                payload = {
+                    "wav": path.name,
+                    "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    **sidecar,
+                }
+                with open(json_path, "w") as f:
+                    _json.dump(payload, f, indent=2)
+            except OSError as e:
+                log.warning("prealert sidecar write failed: %s", e)
+        return path
 
     async def start_rolling_task(self, audio_buffer) -> asyncio.Task | None:
         """If rolling_30min is among configured modes, start the background writer."""
