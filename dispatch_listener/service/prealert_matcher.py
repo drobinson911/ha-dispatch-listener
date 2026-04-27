@@ -56,6 +56,16 @@ class CallTypeRule:
     must_follow_area: bool = False
     not_followed_by: list[str] = field(default_factory=list)
     negative_window_words: int = 4
+    # Per-call-type area restriction. When set, the call type only fires if
+    # one of these areas appears in the transcript before the call_type
+    # phrase. The matched area also counts as a for-us hit for THIS call
+    # type — so "Palermo, structure" fires even if Palermo isn't in the
+    # general prealert_areas / for_us_phrases list, while "Palermo, medical"
+    # does NOT fire (medical doesn't have only_after_areas configured).
+    # Lets us scope structure-and-commercial-structure responses to extended
+    # districts (Palermo, Thermalito, Kelly Ridge) without those areas
+    # firing the matcher for unrelated call types.
+    only_after_areas: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -132,6 +142,11 @@ class PreAlertMatcher:
                         if p and p.strip()
                     ],
                     negative_window_words=int(c.get("negative_window_words") or 4),
+                    only_after_areas=[
+                        a.strip().lower()
+                        for a in (c.get("only_after_areas") or [])
+                        if a and a.strip()
+                    ],
                 )
             )
         # Sort call types by priority desc so "commercial structure" beats "structure"
@@ -230,65 +245,96 @@ class PreAlertMatcher:
     # ── public API ─────────────────────────────────────────────────────
 
     def match(self, transcript: str) -> PreAlertMatch | None:
-        if not transcript or not self.for_us_phrases:
+        if not transcript:
             return None
         text = self._normalize(transcript)
         if not text:
             return None
 
-        # Stage 1: is this for us?
+        # Stage 1: try to find a regular for-us hit (units + global areas).
+        # NOTE: we do NOT early-return on miss — call_types with
+        # only_after_areas can rescue the match in Stage 2 (e.g. "Palermo,
+        # structure" fires even though Palermo isn't in the general for-us
+        # list).
         for_us_hit: tuple[str, float] | None = None
         for p in self.for_us_phrases:
             hit, conf = self._phrase_hit(p, text)
             if not hit:
                 continue
-            # Reject "Oroville" / "Oroville City" matches that are part of
-            # a non-our area name (North Oroville, West Oroville, etc).
             pos = self._phrase_position(p, text)
             if self._is_excluded_area(p, text, pos):
                 continue
             for_us_hit = (p, conf)
             break
-        if for_us_hit is None:
-            return None
 
-        earliest_area_pos = self._earliest_area_position(text) if self.areas else -1
-
-        # Stage 2: what call type? (priority-ordered, first valid hit wins)
+        # Stage 2: what call type? (priority-ordered, first valid hit wins).
+        # Note: a call_type with `only_after_areas` can fire even if Stage 1
+        # didn't find a regular for-us hit — the area in only_after_areas
+        # counts as the for-us hit for THIS call type only. Allows
+        # "Palermo, structure" to match without Palermo being in the
+        # general for-us list (and without Palermo medicals firing).
         for rule in self.call_types:
             for phrase in rule.phrases:
                 hit, conf = self._phrase_hit(phrase, text)
                 if not hit:
                     continue
-
-                # Positional constraint: must come AFTER an area phrase.
-                # Important for "Structure" / "Commercial Structure" so we don't
-                # fire on dispatches for other agencies that happen to contain
-                # "structure" without the Oroville/South Oroville/etc. prefix.
                 phrase_pos = self._phrase_position(phrase, text)
-                if rule.must_follow_area:
-                    if earliest_area_pos < 0 or phrase_pos < 0 or phrase_pos <= earliest_area_pos:
-                        continue
 
-                # Negative-after constraint: the next ~N words must not contain
-                # any of `not_followed_by`. Used to reject "structure fire alarm".
-                if rule.not_followed_by and phrase_pos >= 0:
+                # Determine the area set valid for THIS call type:
+                # - only_after_areas (call-type-specific) OVERRIDES self.areas
+                # - otherwise fall back to the global areas
+                applicable_areas = rule.only_after_areas or self.areas
+
+                # Find the latest applicable area appearing BEFORE phrase_pos.
+                # Reject "Oroville" / "Oroville City" hits that are part of a
+                # non-our compound area (North Oroville, West Oroville, etc).
+                preceding_area: str | None = None
+                preceding_area_pos = -1
+                for area in applicable_areas:
+                    idx = self._phrase_position(area, text)
+                    if not (0 <= idx < phrase_pos):
+                        continue
+                    if self._is_excluded_area(area, text, idx):
+                        continue
+                    if idx > preceding_area_pos:
+                        preceding_area_pos = idx
+                        preceding_area = area
+
+                # must_follow_area: require an area-before-phrase
+                if rule.must_follow_area and preceding_area is None:
+                    continue
+
+                # Negative-after constraint: next ~N words must not contain
+                # any not_followed_by. Used to reject "structure fire alarm".
+                if rule.not_followed_by:
                     end = phrase_pos + len(phrase)
                     tail = self._next_words_after(text, end, rule.negative_window_words)
                     if any(neg in tail for neg in rule.not_followed_by):
                         continue
 
-                overall_conf = min(for_us_hit[1], conf)
+                # Determine effective for-us hit:
+                # 1. Prefer Stage 1 hit (units are more informative than areas)
+                # 2. Fall back to only_after_areas match — this is what lets
+                #    Palermo+structure fire without Palermo in the general
+                #    for-us list.
+                if for_us_hit is not None:
+                    effective_for_us = for_us_hit
+                elif rule.only_after_areas and preceding_area:
+                    effective_for_us = (preceding_area, 1.0)
+                else:
+                    continue  # no for-us hit and not rescued by only_after_areas
+
+                overall_conf = min(effective_for_us[1], conf)
                 return PreAlertMatch(
                     call_type=rule.type,
-                    matched_for_us=for_us_hit[0],
+                    matched_for_us=effective_for_us[0],
                     matched_call_phrase=phrase,
                     webhook_url=rule.webhook_url,
                     confidence=overall_conf,
                 )
 
         # for_us hit but no call type — return generic match if a default is set
-        if self.default_webhook_url:
+        if for_us_hit is not None and self.default_webhook_url:
             return PreAlertMatch(
                 call_type="unknown",
                 matched_for_us=for_us_hit[0],
