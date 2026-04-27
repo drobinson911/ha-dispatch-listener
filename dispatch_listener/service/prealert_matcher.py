@@ -27,6 +27,21 @@ except ImportError:
     HAS_RAPIDFUZZ = False
 
 
+# Other "Oroville" sub-areas exist that are NOT Station 91's response district
+# (North Oroville, West Oroville, East Oroville, etc). The for-us area phrases
+# "oroville" and "oroville city" would otherwise match inside those compounds
+# via word-boundary regex — "Oroville" is a standalone word inside "North
+# Oroville". Reject the hit if the phrase is preceded by a non-our direction.
+_AMBIGUOUS_AREA_PHRASES = {"oroville", "oroville city"}
+_NON_OUR_DIRECTIONS = {
+    "north", "northeast", "northwest",
+    "east", "west",
+    "southeast", "southwest",
+    # NOTE: "south" is OK — "South Oroville" IS ours. That phrase is in the
+    # for_us list verbatim and matches before this exclusion check applies.
+}
+
+
 @dataclass
 class CallTypeRule:
     type: str                       # human-readable label, e.g. "structure"
@@ -182,6 +197,21 @@ class PreAlertMatcher:
         m = re.search(r"\b" + re.escape(phrase) + r"\b", normalized_text)
         return m.start() if m else -1
 
+    def _is_excluded_area(self, phrase: str, normalized_text: str, pos: int) -> bool:
+        """For ambiguous area phrases ("oroville", "oroville city") — return
+        True if the match is preceded by a non-Station-91 direction word
+        (North/East/West Oroville etc are different stations' districts).
+        """
+        if phrase not in _AMBIGUOUS_AREA_PHRASES or pos < 0:
+            return False
+        before = normalized_text[:pos].rstrip()
+        if not before:
+            return False
+        words = before.split()
+        if not words:
+            return False
+        return words[-1] in _NON_OUR_DIRECTIONS
+
     def _earliest_area_position(self, normalized_text: str) -> int:
         """Char index of the earliest area-phrase hit, or -1 if none."""
         best = -1
@@ -210,9 +240,15 @@ class PreAlertMatcher:
         for_us_hit: tuple[str, float] | None = None
         for p in self.for_us_phrases:
             hit, conf = self._phrase_hit(p, text)
-            if hit:
-                for_us_hit = (p, conf)
-                break
+            if not hit:
+                continue
+            # Reject "Oroville" / "Oroville City" matches that are part of
+            # a non-our area name (North Oroville, West Oroville, etc).
+            pos = self._phrase_position(p, text)
+            if self._is_excluded_area(p, text, pos):
+                continue
+            for_us_hit = (p, conf)
+            break
         if for_us_hit is None:
             return None
 
