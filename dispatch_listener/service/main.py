@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 
 
 def load_options() -> dict:
@@ -114,6 +114,7 @@ async def handle_code(
     notifier: Notifier,
     phrase_matcher: PhraseMatcher,
     opts: dict,
+    arm_transcript_log: list[dict] | None = None,
 ) -> None:
     log = logging.getLogger("handler.code")
     log.info("handling code=%s — waiting %ds for post-tone audio…", code, opts["transcribe_seconds"])
@@ -135,6 +136,18 @@ async def handle_code(
     transcript = ""
     if should_transcribe:
         transcript = await transcriber.transcribe(transcribe_audio, CAPTURE_RATE)
+    elif arm_transcript_log:
+        # transcribe_after_match disabled — pull the transcript from what
+        # Deepgram captured during the arm window (the prealert content).
+        # Each entry has {ts, transcript, matched_call_type, matched_for_us,
+        # confidence}. Concatenate unique transcripts in order, deduping
+        # consecutive duplicates from interim passes.
+        seen: list[str] = []
+        for entry in arm_transcript_log:
+            t = (entry.get("transcript") or "").strip()
+            if t and (not seen or seen[-1] != t):
+                seen.append(t)
+        transcript = " | ".join(seen).strip()
 
     matches = phrase_matcher.find_matches(transcript)
     snapshot_path = archiver.write_snapshot(code, snapshot_audio)
@@ -773,6 +786,12 @@ async def main() -> int:
                     notifier=notifier,
                     phrase_matcher=phrase_matcher,
                     opts=opts,
+                    # Pass the just-captured arm-window transcripts so the
+                    # DTMF notifier (Discord webhook for 3901/3992) shows
+                    # what the dispatcher said during the pre-alert. Without
+                    # this, post-DTMF Discord posts have an empty transcript
+                    # field when transcribe_after_match=False.
+                    arm_transcript_log=list(arm_transcript_log),
                 )
             )
 
