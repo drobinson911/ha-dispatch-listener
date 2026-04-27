@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 
 def load_options() -> dict:
@@ -245,6 +245,7 @@ async def _capture_prealert_snapshot(
     pre_sec: float,
     fired_set: set[str],
     whisper_model_name: str,
+    transcript_log: list[dict] | None = None,
 ) -> None:
     """After 3-beep tone fires, wait for the arm window to expire, then save
     a WAV + JSON sidecar of what the addon heard. Sidecar includes whether
@@ -263,6 +264,7 @@ async def _capture_prealert_snapshot(
         "whisper_model_local_fallback": whisper_model_name,
         "wait_window_sec": wait_sec,
         "pre_sec": pre_sec,
+        "transcripts": transcript_log or [],
     }
     archiver.write_prealert_snapshot(audio, sidecar=sidecar)
 
@@ -275,6 +277,7 @@ async def _interim_prealert_pass(
     notifier: Notifier,
     fired_set: set[str],
     suppressor: PrealertSuppressor | None = None,
+    transcript_log: list[dict] | None = None,
 ) -> None:
     """Mid-burst transcription pass — runs every N seconds while a voice burst
     is still ongoing. The point is to fire the HA pre-alert webhook the *instant*
@@ -292,7 +295,10 @@ async def _interim_prealert_pass(
     log.debug("interim transcript: %s", transcript)
     if suppressor is not None and suppressor.suppressed():
         return  # check again after the awaitable — QuickCall could have fired in the meantime
-    await _try_prealert(transcript, matcher=matcher, notifier=notifier, fired_set=fired_set)
+    await _try_prealert(
+        transcript, matcher=matcher, notifier=notifier,
+        fired_set=fired_set, transcript_log=transcript_log,
+    )
 
 
 async def _try_prealert(
@@ -301,12 +307,25 @@ async def _try_prealert(
     matcher: PreAlertMatcher,
     notifier: Notifier,
     fired_set: set[str],
+    transcript_log: list[dict] | None = None,
 ) -> PreAlertMatch | None:
     """Run the 2-stage prealert match. Fire ONCE per call_type per burst.
     `fired_set` is mutated to track what's already been fired this burst."""
     if not matcher.configured:
         return None
     match = matcher.match(transcript)
+    # Append every transcript we evaluate (matched or not) to the optional
+    # log — this is what feeds the prealert JSON sidecar so we can audit
+    # what the addon actually heard during the arm window.
+    if transcript_log is not None:
+        import time as _t
+        transcript_log.append({
+            "ts": _t.time(),
+            "transcript": transcript,
+            "matched_call_type": match.call_type if match else None,
+            "matched_for_us": match.matched_for_us if match else None,
+            "confidence": match.confidence if match else 0.0,
+        })
     if not match:
         return None
     if match.call_type in fired_set:
@@ -340,6 +359,7 @@ async def handle_burst(
     prealert_matcher: PreAlertMatcher | None = None,
     fired_call_types: set[str] | None = None,
     suppressor: PrealertSuppressor | None = None,
+    transcript_log: list[dict] | None = None,
 ) -> None:
     """Pre-alert path: transcribe a voice burst, fire phrase + prealert webhooks on match."""
     log = logging.getLogger("handler.burst")
@@ -361,6 +381,7 @@ async def handle_burst(
             matcher=prealert_matcher,
             notifier=notifier,
             fired_set=fired_call_types if fired_call_types is not None else set(),
+            transcript_log=transcript_log,
         )
 
     matches = phrase_matcher.find_matches(transcript)
@@ -561,6 +582,10 @@ async def main() -> int:
     burst_chunks: list[np.ndarray] = []
     burst_fired_call_types: set[str] = set()
     burst_chunks_since_last_interim: int = 0
+    # Shared transcript log for the current 3-beep arm window — every
+    # interim and final transcript Deepgram/Whisper returns appends here,
+    # so the prealert snapshot's JSON sidecar has the full audit trail.
+    arm_transcript_log: list[dict] = []
     if opts.get("continuous_transcription", False) or prealert_configured:
         vad_cfg = VADConfig(
             sample_rate=CAPTURE_RATE,
@@ -656,6 +681,9 @@ async def main() -> int:
                     # voice will follow within ~1-3s. Without this arm, the
                     # matcher would never fire (require_arm=True).
                     prealert_suppressor.arm()
+                    # Reset the per-arm transcript log so the upcoming
+                    # snapshot captures only THIS pre-alert's transcripts.
+                    arm_transcript_log = []
                     asyncio.create_task(_fire_beep_webhook(beep_pre_alert_url, n))
                     # Schedule a delayed snapshot+sidecar capture: wait for
                     # the dispatcher's transmission to finish (arm window),
@@ -671,6 +699,7 @@ async def main() -> int:
                                 pre_sec=float(opts.get("archive_pre_seconds", 25)),
                                 fired_set=burst_fired_call_types,
                                 whisper_model_name=str(opts.get("whisper_model", "?")),
+                                transcript_log=arm_transcript_log,
                             )
                         )
                 elif n == 2:
@@ -743,6 +772,7 @@ async def main() -> int:
                             notifier=notifier,
                             fired_set=burst_fired_call_types,
                             suppressor=prealert_suppressor,
+                            transcript_log=arm_transcript_log,
                         )
                     )
 
@@ -762,6 +792,7 @@ async def main() -> int:
                         prealert_matcher=prealert_matcher if prealert_matcher.configured else None,
                         fired_call_types=fired_set_for_burst,
                         suppressor=prealert_suppressor,
+                        transcript_log=arm_transcript_log,
                     )
                 )
 
