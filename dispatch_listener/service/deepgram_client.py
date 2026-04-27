@@ -107,12 +107,26 @@ class DeepgramClient:
         wav_bytes = buf.getvalue()
 
         keyterms = self._current_keyterms()
-        # Cap keyterms — Deepgram supports up to a few hundred but huge lists
-        # eat URL length; trim to ~100 most relevant.
-        if len(keyterms) > 100:
-            keyterms = keyterms[:100]
+        # Deepgram's REST URL has a hard length limit (~8KB) and each
+        # keyterm is URL-encoded (~30 chars avg with %20 for spaces). With
+        # ~150 keyterms we hit 400 Bad Request. Cap aggressively at 30 —
+        # prioritize units + areas + Butte Medics, skip street list
+        # (those help less anyway since Deepgram has strong general
+        # English street vocabulary, and our matcher fuzzes the rest).
+        if len(keyterms) > 30:
+            keyterms = keyterms[:30]
         qs = _build_query_params(self.model, keyterms)
         url = f"{self.BASE_URL}?{qs}"
+        if len(url) > 7500:
+            # Belt-and-suspenders: if still too long, halve until it fits.
+            while len(url) > 7500 and len(keyterms) > 5:
+                keyterms = keyterms[: max(5, len(keyterms) // 2)]
+                qs = _build_query_params(self.model, keyterms)
+                url = f"{self.BASE_URL}?{qs}"
+            log.warning(
+                "deepgram URL near limit, trimmed keyterms to %d (url=%d chars)",
+                len(keyterms), len(url),
+            )
 
         try:
             async with httpx.AsyncClient(timeout=self.request_timeout_sec) as client:

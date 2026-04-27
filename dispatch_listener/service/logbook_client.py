@@ -52,17 +52,27 @@ class LogbookBiasClient:
     @property
     def keyterms(self) -> list[str]:
         """Bias terms for STT engines that support keyterm prompting (Deepgram).
-        Returns units + call types + most-common streets. Used as `keyterm=`
-        query params in Deepgram's /v1/listen call."""
+        Returns the highest-leverage bias first since Deepgram caps URL
+        length: areas + Butte Medics, then units, then call types, streets
+        last. The Deepgram client trims this list to ~30 from the head.
+        """
         out: list[str] = []
-        out.extend(self._units)
-        out.extend(self._call_types)
-        out.extend(self._streets)
-        # Always include core area markers — they're not in the D1 lists but
-        # are the most important biases for the for-us check.
+        # 1. Areas + key proper noun (highest leverage — these are the
+        #    most-mistranscribed words and the for-us check depends on them)
         for area in ("Oroville", "Oroville City", "South Oroville", "Butte Medics"):
-            if area not in out:
-                out.append(area)
+            out.append(area)
+        # 2. Unit IDs (used by the matcher's for-us list)
+        for u in self._units:
+            if u not in out:
+                out.append(u)
+        # 3. Call types (used by the matcher's call_type rules)
+        for ct in self._call_types:
+            if ct not in out:
+                out.append(ct)
+        # 4. Streets last — least leverage; matcher fuzzies street names anyway
+        for s in self._streets:
+            if s not in out:
+                out.append(s)
         return out
 
     @property
