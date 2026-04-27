@@ -131,6 +131,13 @@ class PreAlertMatcher:
         # Lowercase, collapse whitespace, strip punctuation that radio TTS
         # transcripts sprinkle in. Keep digits + letters + spaces.
         s = text.lower()
+        # Whisper transcribes the dispatcher's "TC" as "T.C." or "T C" — the
+        # period-stripping below would leave "t c" which doesn't match the
+        # word-boundary "tc" phrase. Pre-collapse common spaced-letter
+        # acronyms back to their compact form before generic punctuation
+        # normalization.
+        s = re.sub(r"\bt\.?\s*c\.?\b", "tc", s)
+        s = re.sub(r"\bp\.?\s*c\.?\b", "pc", s)  # so "P.C." also normalizes (no false-match)
         s = re.sub(r"[^a-z0-9 ]+", " ", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s
