@@ -26,6 +26,7 @@ import numpy as np
 from audio_buffer import AudioBuffer
 from beep_detector import BeepDetector, BeepConfig
 from capture import PulseCapture, autodetect_source
+from deepgram_client import DeepgramClient
 from detector_dtmf import DTMFDecoder
 from archiver import Archiver
 from logbook_client import LogbookBiasClient
@@ -40,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.8.4"
+VERSION = "0.9.0"
 
 
 def load_options() -> dict:
@@ -87,6 +88,8 @@ def load_options() -> dict:
         "whisper_initial_prompt_url": "",
         "whisper_initial_prompt_token": "",
         "whisper_initial_prompt_refresh_hours": 24,
+        "deepgram_api_key": "",
+        "deepgram_model": "nova-3",
         "archive_mode": "snapshot_on_match,rolling_30min",
         "archive_pre_seconds": 25,
         "archive_post_seconds": 30,
@@ -453,6 +456,15 @@ async def main() -> int:
         # Prefer the live D1-derived prompt; fall back to the static config one.
         return bias_client.prompt or static_prompt
 
+    # Deepgram Nova-3 — primary STT for the prealert path. Trained on
+    # narrowband telephony audio (matches VHF radio characteristics) and
+    # supports keyterm prompting from D1 vocabulary, no model retraining.
+    deepgram = DeepgramClient(
+        api_key=opts.get("deepgram_api_key", "") or "",
+        model=opts.get("deepgram_model", "nova-3") or "nova-3",
+        keyterm_provider=lambda: bias_client.keyterms,
+    )
+
     if needs_transcriber:
         transcriber = Transcriber(
             model_name=opts.get("whisper_model", "base.en"),
@@ -460,7 +472,10 @@ async def main() -> int:
             server_url=opts.get("whisper_server_url", ""),
             server_timeout_sec=float(opts.get("whisper_server_timeout_sec", 30.0)),
             initial_prompt_provider=_prompt_provider,
+            deepgram_client=deepgram if deepgram.configured else None,
         )
+        if deepgram.configured:
+            log.info("deepgram primary STT enabled (model=%s)", deepgram.model)
         if transcriber.server_url:
             log.info("whisper remote server configured: %s (local fallback ready)", transcriber.server_url)
         if bias_client.configured:

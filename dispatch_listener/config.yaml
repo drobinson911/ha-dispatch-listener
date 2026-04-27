@@ -1,5 +1,5 @@
 name: Dispatch Listener
-version: 0.8.4
+version: 0.9.0
 slug: dispatch_listener
 description: >
   Listens to a radio/scanner audio feed (USB sound card → PulseAudio),
@@ -65,6 +65,8 @@ options:
   whisper_initial_prompt_url: ""
   whisper_initial_prompt_token: ""
   whisper_initial_prompt_refresh_hours: 24
+  deepgram_api_key: ""
+  deepgram_model: "nova-3"
   archive_mode: "snapshot_on_match,rolling_30min"
   archive_pre_seconds: 25
   archive_post_seconds: 30
@@ -133,6 +135,8 @@ schema:
   whisper_initial_prompt_url: str
   whisper_initial_prompt_token: str
   whisper_initial_prompt_refresh_hours: int(0,168)
+  deepgram_api_key: str
+  deepgram_model: str
   archive_mode: str
   archive_pre_seconds: int(0,30)
   archive_post_seconds: int(0,300)
