@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 
 def load_options() -> dict:
@@ -174,6 +174,11 @@ class PrealertSuppressor:
         self.require_arm = require_arm
         self._last_dtmf_at: float = 0.0
         self._armed_until: float = 0.0
+        # Once the first voice burst after the 3-beep tone has been
+        # processed (handle_burst task done), set this flag — anything
+        # the dispatcher says afterward (re-reads, unit ack, etc.) won't
+        # fire the matcher. Reset on arm().
+        self._first_burst_done: bool = False
 
     def mark_dtmf(self) -> None:
         import time as _t
@@ -184,16 +189,26 @@ class PrealertSuppressor:
         window. Voice bursts during this window are eligible for prealert match."""
         import time as _t
         self._armed_until = _t.time() + self.arm_window_sec
+        self._first_burst_done = False
+
+    def mark_first_burst_done(self) -> None:
+        """Called from the burst_end → handle_burst task's done callback.
+        After this fires, no further bursts in the arm window can match."""
+        self._first_burst_done = True
 
     def suppressed(self) -> bool:
-        """True if pre-alert webhook firing should be skipped. Either:
+        """True if pre-alert webhook firing should be skipped. Three reasons:
         - DTMF fired recently (yield to QuickCall), OR
-        - require_arm is True and the arm window has expired / never opened."""
+        - require_arm is True and the arm window has expired / never opened, OR
+        - the first voice burst after the 3-beep tone has already been
+          processed — anything the dispatcher says next is not pre-alert."""
         import time as _t
         now = _t.time()
         if self._last_dtmf_at and (now - self._last_dtmf_at) < self.dtmf_window_sec:
             return True
         if self.require_arm and now >= self._armed_until:
+            return True
+        if self._first_burst_done:
             return True
         return False
 
@@ -797,20 +812,33 @@ async def main() -> int:
                 burst_audio = np.concatenate(burst_chunks)
                 burst_chunks = []
                 burst_chunks_since_last_interim = 0
-                asyncio.create_task(
+                # If we were ARMED at burst_end, this is THE pre-alert burst.
+                # Donald's rule: "the only info we care about is after the
+                # 3 beeps; when they stop talking, that's the end of the
+                # pre-alert." So mark first-burst-done after this task
+                # completes — any further bursts during the arm window are
+                # not pre-alert (unit acks, dispatcher re-reads, etc.).
+                was_armed_at_burst_end = (
+                    prealert_matcher.configured
+                    and prealert_suppressor._armed_until > 0.0
+                    and not prealert_suppressor._first_burst_done
+                )
+                burst_task = asyncio.create_task(
                     handle_burst(
                         burst_audio,
                         transcriber=transcriber,
                         notifier=notifier,
                         phrase_matcher=phrase_matcher,
                         prealert_matcher=prealert_matcher if prealert_matcher.configured else None,
-                        # Use the ARM-window fired set so a 2nd burst of the same
-                        # dispatch (e.g. dispatcher re-reads) doesn't double-fire.
                         fired_call_types=arm_fired_call_types,
                         suppressor=prealert_suppressor,
                         transcript_log=arm_transcript_log,
                     )
                 )
+                if was_armed_at_burst_end:
+                    burst_task.add_done_callback(
+                        lambda _t: prealert_suppressor.mark_first_burst_done()
+                    )
 
     return 0
 
