@@ -149,15 +149,26 @@ class PreAlertMatcher:
         radio shorthand) would otherwise match every "tch" / "watch" in the
         transcript via substring. Also prevents "structure" matching
         "structures" / "infrastructure".
+
+        Phrases containing digits skip the fuzzy fallback. Unit IDs like
+        "engine 91" / "engine 63" share most characters and partial_ratio
+        scores them at 88%+, leading to false matches across stations
+        (Engine 63 from Magalia firing the Engine 91 trigger). Whisper
+        renders digits deterministically so fuzzy isn't needed here.
         """
         if not phrase:
             return False, 0.0
         # 1. Word-boundary exact match (cheap, common case)
         if re.search(r"\b" + re.escape(phrase) + r"\b", normalized_text):
             return True, 1.0
-        # 2. Fuzzy fallback (typo / mistranscription tolerance) — skip for
-        # very short phrases where partial_ratio over-matches.
-        if HAS_RAPIDFUZZ and self.fuzzy_threshold > 0 and len(phrase) >= 5:
+        # 2. Fuzzy fallback — only for word-only phrases >= 5 chars.
+        has_digit = any(c.isdigit() for c in phrase)
+        if (
+            HAS_RAPIDFUZZ
+            and self.fuzzy_threshold > 0
+            and len(phrase) >= 5
+            and not has_digit
+        ):
             score = fuzz.partial_ratio(phrase, normalized_text)
             if score >= self.fuzzy_threshold:
                 return True, score / 100.0
