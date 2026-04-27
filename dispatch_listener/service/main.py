@@ -41,7 +41,7 @@ OPTIONS_PATH = Path("/data/options.json")
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 CAPTURE_RATE = 16000
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 
 def load_options() -> dict:
@@ -576,11 +576,25 @@ async def main() -> int:
             prealert_suppressor.arm_window_sec,
         )
 
+    def disarm_now() -> None:
+        """Force-disarm the prealert path (called by HA via POST /disarm
+        when the Shelly relay confirms QuickCall). Closes the listening
+        window immediately and prevents further beeps for this dispatch."""
+        prealert_suppressor._armed_until = 0.0
+        # Also seed dtmf-suppression so the next 5s won't fire even if a
+        # mid-flight transcription completes after the disarm.
+        prealert_suppressor.mark_dtmf()
+
     # VAD — active when continuous_transcription is on OR prealert is configured.
     # Prealert needs voice bursts to transcribe + match against the trigger lists.
     vad: VAD | None = None
     burst_chunks: list[np.ndarray] = []
-    burst_fired_call_types: set[str] = set()
+    # Dedupe set for prealert call_types — scoped to the entire ARM WINDOW
+    # (3-beep tone → 90s) instead of per-burst. Without this, a single
+    # dispatch with a repeated voice burst (e.g. dispatcher re-reads call
+    # for the apparatus) would fire the beep twice. Reset only on a new
+    # 3-beep arm event.
+    arm_fired_call_types: set[str] = set()
     burst_chunks_since_last_interim: int = 0
     # Shared transcript log for the current 3-beep arm window — every
     # interim and final transcript Deepgram/Whisper returns appends here,
@@ -615,6 +629,7 @@ async def main() -> int:
             port=int(opts.get("stream_port", 8765)),
             bitrate_kbps=int(opts.get("stream_bitrate_kbps", 96)),
             secret=opts.get("stream_secret", ""),
+            on_disarm=disarm_now,
         )
         await stream_server.start()
         auth_note = "auth: token required" if stream_server.secret else "auth: NONE (open)"
@@ -681,8 +696,11 @@ async def main() -> int:
                     # voice will follow within ~1-3s. Without this arm, the
                     # matcher would never fire (require_arm=True).
                     prealert_suppressor.arm()
-                    # Reset the per-arm transcript log so the upcoming
-                    # snapshot captures only THIS pre-alert's transcripts.
+                    # Reset per-arm-window state on each new 3-beep tone:
+                    # fired_call_types prevents double-firing the same beep
+                    # for one dispatch even across multiple voice bursts;
+                    # transcript_log captures the full audit trail.
+                    arm_fired_call_types = set()
                     arm_transcript_log = []
                     asyncio.create_task(_fire_beep_webhook(beep_pre_alert_url, n))
                     # Schedule a delayed snapshot+sidecar capture: wait for
@@ -697,7 +715,7 @@ async def main() -> int:
                                 archiver=archiver,
                                 wait_sec=float(opts.get("prealert_arm_window_sec", 90.0)),
                                 pre_sec=float(opts.get("archive_pre_seconds", 25)),
-                                fired_set=burst_fired_call_types,
+                                fired_set=arm_fired_call_types,
                                 whisper_model_name=str(opts.get("whisper_model", "?")),
                                 transcript_log=arm_transcript_log,
                             )
@@ -742,7 +760,6 @@ async def main() -> int:
         if vad is not None and transcriber is not None:
             event, _rms_db = vad.feed(chunk)
             if event == "burst_start":
-                burst_fired_call_types = set()
                 burst_chunks_since_last_interim = 0
             if vad.in_burst or event == "burst_end":
                 burst_chunks.append(chunk)
@@ -757,7 +774,7 @@ async def main() -> int:
                 vad.in_burst
                 and prealert_matcher.configured
                 and burst_chunks
-                and len(burst_fired_call_types) == 0  # already fired? no need to keep transcribing
+                and len(arm_fired_call_types) == 0  # already fired this arm window? skip
             ):
                 interim_sec = float(opts.get("prealert_streaming_interval_sec", 2.0))
                 interim_chunks_threshold = max(1, int(interim_sec * 1000 / 20))  # 20ms chunks
@@ -770,7 +787,7 @@ async def main() -> int:
                             transcriber=transcriber,
                             matcher=prealert_matcher,
                             notifier=notifier,
-                            fired_set=burst_fired_call_types,
+                            fired_set=arm_fired_call_types,
                             suppressor=prealert_suppressor,
                             transcript_log=arm_transcript_log,
                         )
@@ -779,9 +796,6 @@ async def main() -> int:
             if event == "burst_end" and burst_chunks:
                 burst_audio = np.concatenate(burst_chunks)
                 burst_chunks = []
-                # capture the per-burst dedupe set for the final pass + reset for next burst
-                fired_set_for_burst = burst_fired_call_types
-                burst_fired_call_types = set()
                 burst_chunks_since_last_interim = 0
                 asyncio.create_task(
                     handle_burst(
@@ -790,7 +804,9 @@ async def main() -> int:
                         notifier=notifier,
                         phrase_matcher=phrase_matcher,
                         prealert_matcher=prealert_matcher if prealert_matcher.configured else None,
-                        fired_call_types=fired_set_for_burst,
+                        # Use the ARM-window fired set so a 2nd burst of the same
+                        # dispatch (e.g. dispatcher re-reads) doesn't double-fire.
+                        fired_call_types=arm_fired_call_types,
                         suppressor=prealert_suppressor,
                         transcript_log=arm_transcript_log,
                     )

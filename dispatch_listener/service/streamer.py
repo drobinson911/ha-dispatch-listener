@@ -27,11 +27,16 @@ class StreamServer:
         port: int = 8765,
         bitrate_kbps: int = 96,
         secret: str = "",
+        on_disarm=None,
     ) -> None:
         self.pulse_source = pulse_source
         self.port = port
         self.bitrate_kbps = bitrate_kbps
         self.secret = secret.strip()
+        # Optional callback: POST /disarm fires this — used to let HA cancel
+        # the prealert path the moment a Shelly relay confirms QuickCall.
+        # Once disarmed, no more pre-alert beeps fire for the dispatch.
+        self.on_disarm = on_disarm
         self._listeners: list[asyncio.Queue[bytes]] = []
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
@@ -42,11 +47,14 @@ class StreamServer:
         app = web.Application()
         app.router.add_get("/stream.mp3", self._stream_handler)
         app.router.add_get("/health", self._health_handler)
+        app.router.add_post("/disarm", self._disarm_handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "0.0.0.0", self.port)
         await site.start()
         log.info("stream server listening on 0.0.0.0:%d/stream.mp3", self.port)
+        if self.on_disarm:
+            log.info("prealert disarm endpoint: POST 0.0.0.0:%d/disarm", self.port)
 
     async def stop(self) -> None:
         async with self._lock:
@@ -95,6 +103,24 @@ class StreamServer:
             "ffmpeg_running": self._ffmpeg is not None and self._ffmpeg.returncode is None,
             "pulse_source": self.pulse_source,
         })
+
+    async def _disarm_handler(self, request: web.Request) -> web.Response:
+        """POST /disarm — cancel the active prealert listening window. Use
+        case: HA's Shelly relay fires (QuickCall confirmed for-us) → HA
+        POSTs here → addon stops firing any further pre-alert beeps for
+        this dispatch. Optional ?token=<secret> matches stream_secret."""
+        if self.secret:
+            token = request.query.get("token") or request.headers.get("X-Stream-Token", "")
+            if token != self.secret:
+                return web.Response(status=401, text="unauthorized")
+        if not self.on_disarm:
+            return web.Response(status=503, text="disarm not configured")
+        try:
+            self.on_disarm()
+            log.info("prealert disarmed via HTTP /disarm")
+        except Exception as e:
+            log.warning("disarm callback raised: %s", e)
+        return web.json_response({"disarmed": True})
 
     async def _add_listener(self, q: asyncio.Queue) -> None:
         async with self._lock:
