@@ -174,17 +174,23 @@ class Transcriber:
             except Exception as e:
                 log.warning("preprocess error %s — using raw audio", e)
 
-        # PRIMARY: Deepgram Nova-3 (telephony/narrowband-tuned, keyterm boosting)
-        text = ""
+        # PRIMARY: Deepgram Nova-3 (telephony/narrowband-tuned, keyterm boosting).
+        # When Deepgram is configured we use it EXCLUSIVELY — no Whisper
+        # fallback. Donald's call: "stop whisper altogether until we have
+        # enough data to start training it. Just use deepgram, it's awesome."
+        # If Deepgram fails (network, 400s, etc.) we return empty rather than
+        # silently letting Whisper produce a different transcript.
         if self.deepgram and getattr(self.deepgram, "configured", False):
             try:
-                text = await self.deepgram.transcribe(audio_for_whisper, sr_for_whisper)
+                return await self.deepgram.transcribe(audio_for_whisper, sr_for_whisper)
             except Exception as e:
-                log.warning("deepgram failed — falling back to whisper: %s", e)
-                text = ""
+                log.warning("deepgram failed (no fallback per config): %s", e)
+                return ""
 
-        # FALLBACK 1: Remote Whisper-large-v3 on the desktop GPU
-        if not text and self.server_url:
+        # FALLBACK PATH 1: Remote Whisper-large-v3 on the desktop GPU.
+        # Only reached when Deepgram is not configured at all.
+        text = ""
+        if self.server_url:
             self._remote_total += 1
             try:
                 text = await self._transcribe_remote(audio_for_whisper, sr_for_whisper)
@@ -196,9 +202,9 @@ class Transcriber:
                 )
                 text = ""
 
-        # FALLBACK 2: Local pywhispercpp on the Pi (only used when no Deepgram +
-        # no remote whisper)
-        if not text and not self.deepgram and not self.server_url:
+        # FALLBACK PATH 2: Local pywhispercpp on the Pi (only when neither
+        # Deepgram nor remote whisper is configured).
+        if not text and not self.server_url:
             if self._lock is None:
                 self._lock = asyncio.Lock()
             async with self._lock:
